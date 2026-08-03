@@ -474,10 +474,11 @@ class StatsAxis(pg.AxisItem):
 
 class GridStatsItem(pg.GraphicsObject):
     """
-    Grid de statistici per lumanare (jos, stil DeepCharts/Sierra): 4 randuri colorate
-    heatmap - T/s (viteza tape-ului), ΣV (volum total), ΔV (delta buy-sell), Δ% (delta /
-    volum). Numerele apar la zoom. Randurile: T/s sus (y 3..4), ΣV (2..3), ΔV (1..2),
-    Δ% jos (0..1).
+    Grid de statistici per lumanare (jos, stil DeepCharts/Sierra): ΣV (volum total),
+    ΔV (delta buy-sell), Δ% (delta / volum) ca heatmap + T/s (viteza tape-ului) ca
+    HISTOGRAMA - inaltimea barei = print-uri/secunda, culoarea = semnul delta (verde buy /
+    mov sell), stil DeepChart. Numerele apar la zoom. Randuri: T/s sus (y 3..4),
+    ΣV (2..3), ΔV (1..2), Δ% jos (0..1).
     """
 
     def __init__(self):
@@ -490,13 +491,12 @@ class GridStatsItem(pg.GraphicsObject):
         self._maxtps = 1.0
         self._bounds = QtCore.QRectF(0, 0, 1, 4)
         self._BUCKETS = 20
-        self._vol_br, self._pos_br, self._neg_br, self._tps_br = [], [], [], []
+        self._vol_br, self._pos_br, self._neg_br = [], [], []
         for i in range(self._BUCKETS):
             a = int(35 + 185 * (i / (self._BUCKETS - 1)))
             cv = QtGui.QColor(120, 135, 162); cv.setAlpha(a); self._vol_br.append(pg.mkBrush(cv))
             cp = QtGui.QColor(theme.BUY); cp.setAlpha(a); self._pos_br.append(pg.mkBrush(cp))
             cn = QtGui.QColor(theme.SELL); cn.setAlpha(a); self._neg_br.append(pg.mkBrush(cn))
-            ct = QtGui.QColor(240, 175, 80); ct.setAlpha(a); self._tps_br.append(pg.mkBrush(ct))  # amber = viteza
 
     def attach(self, viewbox):
         self._vb = viewbox
@@ -539,8 +539,10 @@ class GridStatsItem(pg.GraphicsObject):
             x = t - w / 2.0
             vol = self._vol[i]; dv = self._dv[i]; dp = self._dpct[i]
             if has_tps:
-                p.setBrush(self._tps_br[int(min(1.0, self._tps[i] * itps) * nb)])
-                p.drawRect(QtCore.QRectF(x, 3, w, 1))                   # T/s (viteza tape-ului)
+                frac = min(1.0, self._tps[i] * itps)                   # inaltime bara = viteza tape
+                if frac > 0:                                            # culoare = semnul delta (cine conduce)
+                    p.setBrush((self._pos_br if self._dv[i] >= 0 else self._neg_br)[int(frac * nb)])
+                    p.drawRect(QtCore.QRectF(x, 3, w, frac))            # histograma: creste de la baza randului
             p.setBrush(self._vol_br[int(min(1.0, vol * iv) * nb)])
             p.drawRect(QtCore.QRectF(x, 2, w, 1))                       # ΣV
             p.setBrush((self._pos_br if dv >= 0 else self._neg_br)[int(min(1.0, abs(dv) * idv) * nb)])
@@ -566,7 +568,7 @@ class GridStatsItem(pg.GraphicsObject):
                 continue
             tps_s = f"{self._tps[i]:.0f}/s" if (self._tps is not None
                                                 and len(self._tps) == len(self._t)) else ""
-            vals = ((3.5, tps_s, theme.ACCENT),
+            vals = ((3.5, tps_s, theme.BUY if self._dv[i] >= 0 else theme.SELL),
                     (2.5, _fmt_k(self._vol[i]), theme.TEXT),
                     (1.5, f"{int(round(self._dv[i])):+d}", theme.BUY if self._dv[i] >= 0 else theme.SELL),
                     (0.5, f"{self._dpct[i]:+.0f}%", theme.BUY if self._dpct[i] >= 0 else theme.SELL))
