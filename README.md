@@ -15,8 +15,13 @@ calculează (NU desenează) → `data/` (loader unic + Parquet) → `app/desktop
 ### Volume Profile
 - **POC / VAH / VAL** — Point of Control + Value Area (70%, algoritm de expansiune din POC).
 - **HVN / LVN** — noduri de volum mare (suport/rezistență) și mici (goluri de tranzit), peak detection real.
-- **5 moduri de perioadă** (panou ⚙): Sesiune (22:00→22:00 UTC) · Zi UTC · Composite (săptămână) ·
-  Visible (recalculat pe ce vezi) · Custom range (tragi zona).
+  Toggle **„LVN pe tot profilul"** (⚙ VP): detectează LVN și spre margini = zone de *discount/premium*
+  unde prețul n-a stat, nu doar văile dintre HVN.
+- **7 moduri de perioadă** (panou ⚙): Sesiune (22:00→22:00 UTC) · Zi UTC · Composite (săptămână) ·
+  **Composite 15 zile** · **Composite 90 zile (bias)** · Visible (recalculat pe ce vezi) · Custom range (tragi zona).
+- **Profile per-sesiune (Asia / Londra / NY)** — VP separat pe fiecare sesiune (POC/VAH/VAL + LVN),
+  în 2 moduri: *Fus real* (ancorat Tokyo/Londra/New York, auto vară/iarnă) sau *Ore România fixe*; toate orele
+  editabile (⚙). Checkbox „Sesiuni".
 - **Profil overlay** suprapus peste preț (stil DeepCharts), 2 moduri: *Simplu* (o culoare, VA evidențiată,
   POC accentuat) sau *Buy/Sell* (split verde/mov per nivel).
 - **VA box de ieri + POC ray** proiectat spre dreapta (repere la NY open).
@@ -29,7 +34,9 @@ calculează (NU desenează) → `data/` (loader unic + Parquet) → `app/desktop
   (stil Quantower) la zoom; **imbalance** diagonal (metoda ATAS, ⚙ reglabil); **3 moduri**: Bid×Ask / Volume / Delta.
 - **VWAP** developing + **Anchored VWAP** (unealta „aV": click = ancoră, ex. NY open; VWAP + benzi std-dev).
 - **Developing POC/VA** — trailul migrării valorii în timp (se dezvoltă în replay).
-- **Grid de statistici jos** — ΣV / ΔV / Δ% per lumânare, colorat heatmap (numere la zoom).
+- **Grid de statistici jos** — T/s / ΣV / ΔV / Δ% per lumânare, colorat heatmap (numere la zoom).
+- **Speed of tape** — rândul **T/s** din grid: câte print-uri (trade-uri) pe secundă are fiecare lumânare.
+  Independent de volum (multe print-uri mici = tape rapid; puține mari = blocuri); spike = agresivitate/breakout.
 
 ### Semnale
 - **Big Trades** — bule la tranzacțiile mari (participare instituțională), hover cu detalii, zone S/R (⚙ prag).
@@ -50,27 +57,61 @@ calculează (NU desenează) → `data/` (loader unic + Parquet) → `app/desktop
 
 ---
 
-## Setup (mașină nouă)
+## Instalare pe un PC NOU (pas cu pas)
+
+Repo-ul conține **doar codul** — datele (mari, regenerabile din Databento) NU sunt pe GitHub.
+Pe o mașină nouă:
+
+**1. Instalează cele necesare (o singură dată):**
+- **Python 3.14** de pe [python.org](https://www.python.org/downloads/) — la instalare bifează **„Add Python to PATH"**.
+- **Git** de pe [git-scm.com](https://git-scm.com/download/win) (sau descarci repo-ul ca ZIP din GitHub → „Code" → „Download ZIP").
+
+**2. Clonează repo-ul** (într-un folder la alegere, ex. `D:\`):
 
 ```bash
-cd "D:\Volume Profile"
+git clone https://github.com/Serin15/volume-profile-terminal.git "Volume Profile"
+cd "Volume Profile"
+```
+
+**3. Instalează aplicația** — dublu-click pe **`setup.bat`**.
+Creează `.venv`, instalează pachetele (din `requirements-lock.txt`, cu fallback pe `requirements.txt`),
+instalează proiectul editabil și pornește aplicația. Echivalent manual:
+
+```bash
 python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\pip install -r requirements-lock.txt
 .venv\Scripts\pip install -e .        # face import-urile core/data/app sa mearga peste tot
 ```
 
-Sau, mai simplu, rulează `setup.bat` (o singură dată).
+**4. Adu-ți datele** (aplicația are nevoie de cel puțin o zi ca să pornească):
+- **Cel mai simplu** — copiază folderul `data\parquet\` de pe PC-ul vechi (USB / cloud) în același loc.
+  (Doar `.parquet` e suficient; `.csv`-urile brute din `data\raw\` sunt opționale.)
+- **Sau** descarcă zile noi din Databento — vezi „Adăugare zile noi de date" mai jos.
+
+Gata. Data viitoare pornești cu **`start.bat`**.
+
+> **Notă:** pe alt PC ai nevoie doar de codul din GitHub + folderul `data\parquet\`. Restul (`.venv`,
+> pachete) se recreează cu `setup.bat`. Ce modifici pe un PC → `git add/commit/push`, pe celălalt → `git pull`.
 
 ## Rulare
 
 Aplicația desktop:
 
 ```bash
-cd "D:\Volume Profile"
 .venv\Scripts\python run_desktop.py
 ```
 
 Sau dublu-click pe `start.bat` (sau shortcut-ul de pe Desktop).
+
+## Sincronizare între PC-uri (git)
+
+```bash
+git pull                       # aduci ultimele modificari (la inceputul sesiunii)
+# ... lucrezi ...
+git add -A && git commit -m "descriere" && git push    # trimiti la final
+```
+
+Datele NU se sincronizează prin git (sunt în `.gitignore`) — le muți manual sau le redescarci.
 
 ## Adăugare zile noi de date
 
@@ -86,7 +127,7 @@ Câmpul `side`: A = sell aggressor, B = buy aggressor.
 ## Teste
 
 ```bash
-.venv\Scripts\python -m pytest -q      # 68 teste
+.venv\Scripts\python -m pytest -q      # 78 teste
 ```
 
 Motoarele sunt verificate independent (POC/VA/HVN/LVN, delta/CVD, footprint, absorption,
@@ -134,11 +175,12 @@ Documentatie detaliata: DOCUMENTATIE.md, PACHET-COMPLET.md, INSPIRATIE-platforme
 
 ## Stadiu & roadmap
 
-Terminalul e complet și funcțional pentru **backtesting + învățat order flow** (68 teste trec).
+Terminalul e complet și funcțional pentru **backtesting + învățat order flow** (78 teste trec).
 
 - [x] Motoare de calcul + loader + Parquet + teste
 - [x] Terminal desktop complet (VP, footprint, order flow, semnale, replay, desen)
 - [x] Instrumente pro: Anchored VWAP, Developing POC/VA, Exhaustion, grid stats, Compare
+- [x] Workflow „pro": LVN pe tot profilul, Composite 15/90 zile, Profile per-sesiune (Asia/Londra/NY), Speed of tape
 - [ ] **Date LIVE** (Databento Standard ~$199/lună) — pasul spre tranzacționare reală
 - [ ] DOM ladder (MBP-10) + Liquidity Heatmap Bookmap (MBO) — cer date noi
 - [ ] Datorie tehnică: lumânări randare incrementală (acum full-redraw ~33 FPS)

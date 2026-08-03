@@ -22,6 +22,7 @@ from data.loader import PARQUET_DIR, RAW_DIR
 from app.desktop import theme
 from app.desktop.data_service import (load_day, INTERVAL_SECONDS, resolve_ticks,
                                       prior_session_levels, profile_from_footprint,
+                                      session_profiles, SESSION_DEFS,
                                       BIG_TRADE_MIN, ABS_MIN_VOL, ABS_DOM, ABS_REJECT,
                                       EXH_WINDOW, EXH_VOL_MULT, EXH_DELTA_FRAC)
 from app.desktop.charts import (CandlestickItem, ProfileOverlayItem, FootprintItem,
@@ -178,6 +179,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._prog_range = False     # garda: schimbare de range facuta de noi (nu de user)
         self._prog_slider = False    # garda: mutare scrubber facuta de noi (nu de user)
         self._vp_scope = "full"      # 'full' (sesiune) sau 'visible' (profil pe ce vezi)
+        self._lvn_full = False       # LVN pe tot profilul (nu doar intre HVN) - din ⚙ VP
+        # Profile per-sesiune (Asia/Londra/NY): mod de definire + ore EDITABILE (copie mutabila)
+        self._sess_mode = "real"     # 'real' (fus bursa, auto DST) sau 'ro' (ore Romania fixe)
+        self._sessions = {m: [[n, tz, [a, b], [c, d]] for (n, tz, (a, b), (c, d)) in defs]
+                          for m, defs in SESSION_DEFS.items()}
+        self._sess_data = None
+        self._sess_dialog = None
         self._vp_dialog = None
         self._big_min = BIG_TRADE_MIN    # prag Big Trades (reglabil din ⚙)
         self._bt_zones = False           # zone S/R din cele mai mari tranzactii (⚙)
@@ -254,6 +262,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- Controale VP: traiesc in panoul ⚙, nu in bara (structura DeepCharts) ---
         self.cbo_period = QtWidgets.QComboBox()
         self.cbo_period.addItems(["Sesiune", "Zi UTC", "Composite (saptamana)",
+                                  "Composite 15 zile", "Composite 90 zile (bias)",
                                   "Visible (ce vezi)", "Custom range (trage)"])
         self.cbo_va = QtWidgets.QComboBox()
         self.cbo_va.addItems(["60", "68", "70", "80", "90"]); self.cbo_va.setCurrentText("70")
@@ -284,6 +293,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_prior.setToolTip("Nivelurile sesiunii precedente: yPOC / yVAH / yVAL + PDH / PDL")
         self.chk_session = QtWidgets.QCheckBox("RTH"); self.chk_session.setChecked(True)
         self.chk_session.setToolTip("Umbreste overnight (Globex) -> sesiunea NY (RTH 16:30 RO / 09:30 ET) iese in evidenta")
+        self.chk_sess = QtWidgets.QCheckBox("Sesiuni"); self.chk_sess.setChecked(False)
+        self.chk_sess.setToolTip("Volume Profile SEPARAT pe Asia / Londra / NY (VAH/VAL + LVN per sesiune)")
+        self.btn_sess_settings = _gear("Setari Sesiuni (mod definire: fus real / ore RO + ore editabile)")
         self.chk_dev = QtWidgets.QCheckBox("Dev"); self.chk_dev.setChecked(False)
         self.chk_dev.setToolTip("Developing POC / Value Area: cum a migrat valoarea in timp (trail per lumanare, se dezvolta in replay)")
         self.chk_grid = QtWidgets.QCheckBox("Grid"); self.chk_grid.setChecked(True)
@@ -322,6 +334,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_exh.stateChanged.connect(self._apply_lod)
         self.chk_prior.stateChanged.connect(self._update_prior_visibility)
         self.chk_session.stateChanged.connect(self._update_session_shading)
+        self.chk_sess.stateChanged.connect(self._on_sess_toggled)
+        self.btn_sess_settings.clicked.connect(self._open_sess_settings)
         self.chk_dev.stateChanged.connect(self._rerender_current)
         self.chk_grid.stateChanged.connect(self._on_grid_toggled)
         self.chk_cvd.stateChanged.connect(self._on_cvd_toggled)
@@ -350,6 +364,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cbo_vp_color.setCurrentIndex(0 if self.profile_item.mode == "single" else 1)
             self.cbo_vp_color.currentIndexChanged.connect(self._on_vp_color_changed)
             form.addRow("Culoare profil", self.cbo_vp_color)
+            self.chk_lvn_full = QtWidgets.QCheckBox("LVN pe tot profilul")
+            self.chk_lvn_full.setChecked(self._lvn_full)
+            self.chk_lvn_full.setToolTip(
+                "Detecteaza LVN pe TOT profilul (inclusiv spre margini = discount/premium),\n"
+                "nu doar vaile dintre HVN-uri. Zone unde pretul NU a stat.")
+            self.chk_lvn_full.stateChanged.connect(self._on_lvn_full_changed)
+            form.addRow(self.chk_lvn_full)
             hint = QtWidgets.QLabel("Visible = profilul se recalculeaza doar pe ce vezi pe ecran.")
             hint.setObjectName("FieldLabel"); hint.setWordWrap(True)
             form.addRow(hint)
@@ -359,6 +380,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_vp_color_changed(self, idx):
         """Comuta profilul VP intre 'simplu' (o culoare + VA evidentiata) si 'buy/sell'."""
         self.profile_item.set_mode("single" if idx == 0 else "split")
+
+    def _on_lvn_full_changed(self, *a):
+        """Toggle LVN pe tot profilul (nu doar intre HVN-uri) -> reload cu pozitia pastrata."""
+        self._lvn_full = self.chk_lvn_full.isChecked()
+        self._reload_keep()
 
     def _open_bt_settings(self):
         """Panou ⚙ Big Trades: pragul minim de contracte."""
@@ -479,6 +505,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self._sep())
         lay.addWidget(self.chk_prior)                                  # Context / sesiune
         lay.addWidget(self.chk_session)
+        lay.addWidget(self.chk_sess); lay.addWidget(self.btn_sess_settings)
         lay.addStretch(1)
         # Session Browser + Compare (dreapta)
         cl = QtWidgets.QLabel("Compară:"); cl.setObjectName("FieldLabel")
@@ -637,7 +664,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.grid_plot.hideAxis("right")
         self.grid_plot.setMouseEnabled(x=False, y=False)
         self.grid_plot.getViewBox().setMenuEnabled(False)
-        self.grid_plot.setYRange(0, 3, padding=0)
+        self.grid_plot.setYRange(0, 4, padding=0)
         gl = self.grid_plot.getAxis("left")
         gl.setTextPen(theme.TEXT_DIM); gl.setPen(pg.mkPen(theme.BORDER, width=1)); gl.setWidth(34)
         gb = self.grid_plot.getAxis("bottom")
@@ -812,6 +839,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._prior = None
 
         self.node_lines = []  # HVN/LVN - recreate la fiecare reload
+        self._sess_lines = []  # niveluri profile per-sesiune (Asia/Londra/NY) - recreate la reload
         self._hvn_prices = []  # preturile HVN/LVN curente (pt identificare la hover)
         self._lvn_prices = []
         self.bt_zone_lines = []  # zone S/R din Big Trades (optional)
@@ -1107,7 +1135,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if per.startswith("Zi UTC"):
             self._mode, self._span = "utc", "day"
         elif per.startswith("Composite"):
-            self._mode, self._span = "session", "week"
+            self._mode = "session"
+            self._span = ("15d" if "15" in per else
+                          "90d" if "90" in per else "week")
         else:                                    # Sesiune / Visible / Custom
             self._mode, self._span = "session", "day"
         self._vp_scope = ("visible" if per.startswith("Visible")
@@ -1120,7 +1150,7 @@ class MainWindow(QtWidgets.QMainWindow):
                          row_size=float(self.cbo_res.currentText()),
                          mode=self._mode, span=self._span,
                          big_trade_min=self._big_min, abs_params=self._abs_params,
-                         exh_params=self._exh_params)
+                         exh_params=self._exh_params, lvn_full_profile=self._lvn_full)
         finally:
             self.unsetCursor()
 
@@ -1129,6 +1159,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._data_full = d
         self._apply_tz()   # recalculeaza fusul pentru DATA acestei zile (ora vara/iarna corecta)
         self._update_prior_levels()   # nivelurile sesiunii precedente (yPOC/yVAH/yVAL/PDH/PDL)
+        self._update_session_profiles()  # profile separate Asia/Londra/NY (VAH/VAL + LVN)
         self._setup_custom_region()   # arata/ascunde zona Custom range
 
         if self.btn_replay.isChecked():
@@ -1173,7 +1204,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not epochs:
             return
         res = profile_from_footprint(d.footprint, epochs, d.row_size,
-                                     float(self.cbo_va.currentText()) / 100.0)
+                                     float(self.cbo_va.currentText()) / 100.0,
+                                     lvn_full_profile=self._lvn_full)
         if res is None:
             return
         if self.chk_vp.isChecked():
@@ -1282,7 +1314,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # Grid statistici jos: ΣV / ΔV / Δ% per lumanare (delta = diferenta CVD-ului)
         if len(d.t):
             delta_v = np.diff(d.cvd, prepend=0.0)   # delta per lumanare (cvd = cumulativ)
-            self.grid_stats.set_data(d.t, d.volume, delta_v, d.bar_seconds)
+            self.grid_stats.set_data(d.t, d.volume, delta_v, d.bar_seconds,
+                                     tps=getattr(d, "tps", None))
 
         # Big Trades - bule (marime dupa volum, verde=buy / mov=sell)
         if d.big_trades:
@@ -1402,7 +1435,7 @@ class MainWindow(QtWidgets.QMainWindow):
                               va_percent=float(self.cbo_va.currentText()) / 100.0,
                               row_size=float(self.cbo_res.currentText()),
                               big_trade_min=self._big_min, abs_params=self._abs_params,
-                              exh_params=self._exh_params)
+                              exh_params=self._exh_params, lvn_full_profile=self._lvn_full)
         self._follow = True
         self.btn_follow.blockSignals(True)
         self.btn_follow.setChecked(True)
@@ -1519,6 +1552,106 @@ class MainWindow(QtWidgets.QMainWindow):
         for ln in self.prior_lines.values():
             ln.setVisible(show)
         self.prior_va_band.setVisible(show)
+
+    # ---------- Profile per-sesiune (Asia / Londra / NY) ----------
+    def _active_sessions(self):
+        """Definitiile de sesiune pentru modul curent (fus real / ore RO fixe)."""
+        return self._sessions[self._sess_mode]
+
+    def _update_session_profiles(self):
+        """Calculeaza VP separat pe Asia/Londra/NY (doar mod '1 zi') + (re)deseneaza."""
+        self._sess_data = None
+        if self._span == "day":
+            try:
+                self._sess_data = session_profiles(
+                    self.cbo_day.currentData(), sessions=self._active_sessions(),
+                    mode=self._mode, va_percent=float(self.cbo_va.currentText()) / 100.0,
+                    row_size=float(self.cbo_res.currentText()),
+                    lvn_full_profile=self._lvn_full)
+            except Exception:
+                self._sess_data = None
+        self._render_session_lines()
+
+    def _render_session_lines(self):
+        """(Re)deseneaza nivelurile per-sesiune. Sursa unica pentru curatare + desen."""
+        for ln in self._sess_lines:
+            self.price.removeItem(ln)
+        self._sess_lines = []
+        if not (self.chk_sess.isChecked() and self._sess_data):
+            return
+        abbr = {"Asia": "A", "Londra": "L", "NY": "NY"}
+        for name, info in self._sess_data.items():
+            col = QtGui.QColor(theme.SESS_COLORS.get(name, theme.TEXT_DIM))
+            tag = abbr.get(name, name[:2])
+            for key, width, dash, lab in (("poc", 2, QtCore.Qt.SolidLine, "POC"),
+                                          ("vah", 1, QtCore.Qt.DashLine, "VAH"),
+                                          ("val", 1, QtCore.Qt.DashLine, "VAL")):
+                v = info.get(key)
+                if v is None:
+                    continue
+                ln = pg.InfiniteLine(
+                    pos=v, angle=0, movable=False,
+                    pen=pg.mkPen(col, width=width, style=dash),
+                    label=f"{tag} {lab}", labelOpts={"position": 0.86, "color": "#0a0a0a",
+                                                     "fill": col, "movable": False})
+                ln.setZValue(-4); self.price.addItem(ln); self._sess_lines.append(ln)
+            for v in info.get("lvn", []):
+                ln = pg.InfiniteLine(pos=v, angle=0, movable=False,
+                                     pen=pg.mkPen(col, width=1, style=QtCore.Qt.DotLine))
+                ln.setZValue(-4); self.price.addItem(ln); self._sess_lines.append(ln)
+
+    def _on_sess_toggled(self, *a):
+        """Toggle 'Sesiuni' din bara de straturi -> doar redesenare (fara recalcul)."""
+        self._render_session_lines()
+
+    def _open_sess_settings(self):
+        """Panou ⚙ Sesiuni: mod de definire (fus real / ore RO) + orele fiecarei sesiuni.
+        Dialogul se reconstruieste la fiecare deschidere -> reflecta mereu starea curenta."""
+        if self._sess_dialog is not None:
+            self._sess_dialog.close()
+        dlg = QtWidgets.QDialog(self); dlg.setWindowTitle("Sesiuni — setari")
+        dlg.setObjectName("VPDialog")
+        form = QtWidgets.QFormLayout(dlg)
+        form.setContentsMargins(16, 14, 16, 14); form.setSpacing(10)
+        mode_cbo = QtWidgets.QComboBox()
+        mode_cbo.addItems(["Fus real (auto vară/iarnă)", "Ore România fixe"])
+        mode_cbo.setCurrentIndex(0 if self._sess_mode == "real" else 1)
+        form.addRow("Definire", mode_cbo)
+
+        edits = []
+        for i, (name, tz, (sh, sm), (eh, em)) in enumerate(self._active_sessions()):
+            te_s = QtWidgets.QTimeEdit(QtCore.QTime(sh, sm)); te_s.setDisplayFormat("HH:mm")
+            te_e = QtWidgets.QTimeEdit(QtCore.QTime(eh, em)); te_e.setDisplayFormat("HH:mm")
+            row = QtWidgets.QWidget(); rl = QtWidgets.QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(6)
+            rl.addWidget(te_s); rl.addWidget(QtWidgets.QLabel("–")); rl.addWidget(te_e)
+            suffix = "" if self._sess_mode == "ro" else f"  ({tz.split('/')[-1]})"
+            form.addRow(name + suffix, row)
+            edits.append((i, te_s, te_e))
+
+        hint = QtWidgets.QLabel(
+            "Fus real = orele in fusul bursei (auto vară/iarnă). "
+            "Ore România fixe = exact orele de mai jos, fără ajustare.")
+        hint.setObjectName("FieldLabel"); hint.setWordWrap(True); form.addRow(hint)
+
+        def on_mode(idx):
+            self._sess_mode = "real" if idx == 0 else "ro"
+            self._update_session_profiles()
+            self._open_sess_settings()          # reconstruieste cu orele modului nou
+
+        def on_time(*a):
+            for i, te_s, te_e in edits:
+                s, e = te_s.time(), te_e.time()
+                self._sessions[self._sess_mode][i][2] = [s.hour(), s.minute()]
+                self._sessions[self._sess_mode][i][3] = [e.hour(), e.minute()]
+            self._update_session_profiles()
+
+        mode_cbo.currentIndexChanged.connect(on_mode)
+        for _, te_s, te_e in edits:
+            te_s.timeChanged.connect(on_time)
+            te_e.timeChanged.connect(on_time)
+        self._sess_dialog = dlg
+        dlg.show(); dlg.raise_()
 
     def _on_grid_toggled(self, *a):
         """Arata/ascunde grid-ul de statistici. Axa de timp ramane jos (nu ascundem plot-ul)."""

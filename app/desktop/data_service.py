@@ -9,6 +9,7 @@ import os
 import glob
 import math
 import datetime
+from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
 from collections import defaultdict
 
@@ -66,6 +67,8 @@ class DayData:
     dev_poc: np.ndarray = field(default_factory=lambda: np.zeros(0))
     dev_vah: np.ndarray = field(default_factory=lambda: np.zeros(0))
     dev_val: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    # Speed of tape: trade-uri (print-uri) pe secunda per lumanare (viteza tape-ului)
+    tps: np.ndarray = field(default_factory=lambda: np.zeros(0))
 
 
 def _date_of(name):
@@ -292,11 +295,15 @@ def detect_exhaustion(footprint, t, high, low, close, volume, exclude_last=False
     return out
 
 
-def profile_from_footprint(footprint, epochs, row_size, va_percent=0.70):
+def profile_from_footprint(footprint, epochs, row_size, va_percent=0.70,
+                           lvn_full_profile=False):
     """
     Profil VP (POC/VA/HVN/LVN + split buy/sell) agregat DOAR pe lumanarile din `epochs`,
     reutilizand footprint-ul deja calculat. Folosit de modul VISIBLE RANGE (profil pe
     ce vezi pe ecran). Returneaza dict sau None daca nu e volum.
+
+    lvn_full_profile: daca True, LVN-urile se detecteaza pe TOT profilul (inclusiv spre
+        margini = discount/premium), nu doar vaile dintre HVN-uri.
     """
     buy_by, sell_by = {}, {}
     for ep in epochs:
@@ -315,8 +322,10 @@ def profile_from_footprint(footprint, epochs, row_size, va_percent=0.70):
         if tot > 0:
             vp.add_tick(p, tot)
     vpr = vp.result(va_percent=va_percent)
-    node_hvn, node_lvn = vp.compute_hvn_lvn_peaks(min_prominence_ratio=0.4)
-    hvn, lvn = _top_nodes(node_hvn, node_lvn, vpr.profile)
+    node_hvn, node_lvn = vp.compute_hvn_lvn_peaks(
+        min_prominence_ratio=0.4, lvn_within_hvn=not lvn_full_profile)
+    hvn, lvn = _top_nodes(node_hvn, node_lvn, vpr.profile,
+                          max_lvn=6 if lvn_full_profile else 3)
     return dict(
         bin_price=np.array(prices, dtype=float),
         bin_buy=np.array([buy_by.get(p, 0.0) for p in prices]),
@@ -362,13 +371,109 @@ def prior_session_levels(filename, mode="session", va_percent=0.70, row_size=2.0
     }
 
 
+# Definitii implicite de sesiuni pentru profile SEPARATE (Asia / Londra / NY).
+#   'real' -> orele ancorate in fusul bursei (auto vara/iarna via zoneinfo).
+#   'ro'   -> aceleasi ferestre, dar fixate ca ore Romania (fara ajustare DST).
+# Format: (nume, fus, (ora_start, min_start), (ora_stop, min_stop)) - orele in `fus`.
+SESSION_DEFS = {
+    "real": [
+        ("Asia",   "Asia/Tokyo",        (8, 0),  (16, 0)),
+        ("Londra", "Europe/London",     (8, 0),  (16, 0)),
+        ("NY",     "America/New_York",  (9, 30), (16, 0)),   # RTH / cash open
+    ],
+    "ro": [
+        ("Asia",   "Europe/Bucharest",  (2, 0),  (10, 0)),
+        ("Londra", "Europe/Bucharest",  (10, 0), (18, 0)),
+        ("NY",     "Europe/Bucharest",  (16, 30), (23, 0)),
+    ],
+}
+
+
+def session_profiles(filename, sessions, mode="session",
+                     va_percent=0.70, row_size=2.0, lvn_full_profile=False):
+    """
+    Volume Profile SEPARAT pe fiecare sesiune (Asia/Londra/NY) pentru ziua din `filename`.
+
+    `sessions`: lista de (nume, fus, (sh, sm), (eh, em)) - orele in fusul `fus`.
+        Fereastra fiecarei sesiuni se ancoreaza pe data zilei in fusul ei, apoi se
+        converteste in UTC (zoneinfo -> corect si vara si iarna). Tick-urile din
+        fereastra formeaza profilul acelei sesiuni.
+
+    Returneaza {nume: {poc, vah, val, hvn, lvn, high, low, start, end, total}}
+    (doar sesiunile care au volum). start/end = epoci UTC (secunde).
+    """
+    date = _date_of(filename)
+    if not date:
+        return {}
+    tk, _ = _get_ticks(filename, mode)
+    df = tk.df
+    if df.empty:
+        return {}
+    tsec = (df["ts"].astype("int64") // 10**9).to_numpy()
+    prices = df["price"].to_numpy()
+    sizes = df["size"].to_numpy()
+    y, mo, dd = int(date[:4]), int(date[4:6]), int(date[6:8])
+
+    out = {}
+    for name, tz, (sh, sm), (eh, em) in sessions:
+        z = ZoneInfo(tz)
+        start = datetime.datetime(y, mo, dd, sh, sm, tzinfo=z).timestamp()
+        end = datetime.datetime(y, mo, dd, eh, em, tzinfo=z).timestamp()
+        if end <= start:
+            end += 86400.0   # sesiune care trece de miezul noptii in fusul ei
+        mask = (tsec >= start) & (tsec < end)
+        if not mask.any():
+            continue
+        sp = prices[mask]
+        vp = VolumeProfileEngine(tick_size=row_size)
+        vp.add_ticks_bulk(zip(sp.tolist(), sizes[mask].tolist()))
+        vpr = vp.result(va_percent=va_percent)
+        node_hvn, node_lvn = vp.compute_hvn_lvn_peaks(
+            min_prominence_ratio=0.4, lvn_within_hvn=not lvn_full_profile)
+        hvn, lvn = _top_nodes(node_hvn, node_lvn, vpr.profile,
+                              max_lvn=6 if lvn_full_profile else 3)
+        out[name] = {
+            "poc": vpr.poc, "vah": vpr.vah, "val": vpr.val,
+            "hvn": hvn, "lvn": lvn,
+            "high": float(sp.max()), "low": float(sp.min()),
+            "start": float(start), "end": float(end),
+            "total": vpr.total_volume,
+        }
+    return out
+
+
+def _last_n_days_block(date, available, n):
+    """Fisierele pentru ultimele `n` zile calendaristice pana la `date` inclusiv
+    (doar cele existente). Composite pe fereastra FIXA de N zile, spre deosebire de
+    _contiguous_block care ia tot blocul de zile consecutive descarcate."""
+    if not date:
+        return []
+    to_d = lambda s: datetime.date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+    try:
+        end = to_d(date)
+    except (ValueError, TypeError):
+        return []
+    start = end - datetime.timedelta(days=n - 1)
+    return [available[d] for d in sorted(available) if start <= to_d(d) <= end]
+
+
 def resolve_ticks(filename, mode="session", span="day"):
-    """Tick-urile (SessionTicks) folosite pentru o selectie - reutilizat si de Replay."""
+    """Tick-urile (SessionTicks) folosite pentru o selectie - reutilizat si de Replay.
+
+    span: 'day'  -> o sesiune;
+          'week' -> tot blocul de zile consecutive descarcate;
+          'Nd'   -> composite pe ultimele N zile calendaristice (ex. '15d', '90d').
+    """
     if span == "week":
         date = _date_of(filename)
         available = _available_by_date()
         block = _contiguous_block(date, available) if date else [filename]
         return load_many(block), False
+    if isinstance(span, str) and span.endswith("d") and span[:-1].isdigit():
+        date = _date_of(filename)
+        available = _available_by_date()
+        block = _last_n_days_block(date, available, int(span[:-1])) if date else []
+        return load_many(block or [filename]), False
     return _get_ticks(filename, mode)
 
 
@@ -395,7 +500,8 @@ def developing_levels(footprint, t, row_size, va_percent):
 
 def load_day(filename, va_percent=0.70, interval="5min", row_size=2.0,
              mode="session", span="day",
-             big_trade_min=BIG_TRADE_MIN, abs_params=None, exh_params=None) -> DayData:
+             big_trade_min=BIG_TRADE_MIN, abs_params=None, exh_params=None,
+             lvn_full_profile=False) -> DayData:
     tk, incomplete = resolve_ticks(filename, mode, span)
     df = tk.df
 
@@ -442,9 +548,12 @@ def load_day(filename, va_percent=0.70, interval="5min", row_size=2.0,
         else:
             bin_buy[i] = bin_sell[i] = total / 2.0
 
-    # HVN/LVN pe aceeasi grila, prag strict (nod clar peste/sub medie) + top-N
-    node_hvn, node_lvn = vp.compute_hvn_lvn_peaks(min_prominence_ratio=0.4)
-    hvn_top, lvn_top = _top_nodes(node_hvn, node_lvn, vpr.profile)
+    # HVN/LVN pe aceeasi grila, prag strict (nod clar peste/sub medie) + top-N.
+    # lvn_full_profile -> LVN pe tot profilul (inclusiv spre margini = discount/premium).
+    node_hvn, node_lvn = vp.compute_hvn_lvn_peaks(
+        min_prominence_ratio=0.4, lvn_within_hvn=not lvn_full_profile)
+    hvn_top, lvn_top = _top_nodes(node_hvn, node_lvn, vpr.profile,
+                                  max_lvn=6 if lvn_full_profile else 3)
 
     # Footprint: buy/sell per (lumanare, nivel de pret) - pentru order flow detaliat
     footprint = _build_footprint(tk.df, interval, row_size)
@@ -464,6 +573,16 @@ def load_day(filename, va_percent=0.70, interval="5min", row_size=2.0,
     # Developing POC/VA: trail-ul cumulativ per lumanare (ultima valoare = POC/VA total)
     dev_poc, dev_vah, dev_val = developing_levels(footprint, t, row_size, va_percent)
 
+    # Speed of tape: nr. de trade-uri (print-uri) pe secunda per lumanare. Independent de
+    # volum - multe print-uri mici = tape rapid; putine mari = tape lent (blocuri).
+    if len(t):
+        cand = (tk.df["ts"].dt.floor(interval).astype("int64") // 10**9)
+        counts = cand.value_counts()
+        bar_sec = INTERVAL_SECONDS[interval]
+        tps = np.array([float(counts.get(int(round(tt)), 0)) / bar_sec for tt in t])
+    else:
+        tps = np.zeros(0)
+
     return DayData(
         symbol=tk.symbol, n_ticks=len(tk),
         t=t, open=o_, high=h_, low=l_, close=c_, volume=v_,
@@ -475,5 +594,5 @@ def load_day(filename, va_percent=0.70, interval="5min", row_size=2.0,
         buy_total=der.total_buy_volume, sell_total=der.total_sell_volume,
         mode=mode, incomplete=incomplete, footprint=footprint, big_trades=big_trades,
         absorption=absorption, exhaustion=exhaustion,
-        dev_poc=dev_poc, dev_vah=dev_vah, dev_val=dev_val,
+        dev_poc=dev_poc, dev_vah=dev_vah, dev_val=dev_val, tps=tps,
     )

@@ -462,11 +462,11 @@ def _fmt_k(v):
 
 
 class StatsAxis(pg.AxisItem):
-    """Axa stanga a grid-ului de statistici: etichete fixe ΣV / ΔV / Δ% pe cele 3 randuri."""
-    _LABELS = {2.5: "ΣV", 1.5: "ΔV", 0.5: "Δ%"}
+    """Axa stanga a grid-ului de statistici: etichete fixe T/s / ΣV / ΔV / Δ% pe cele 4 randuri."""
+    _LABELS = {3.5: "T/s", 2.5: "ΣV", 1.5: "ΔV", 0.5: "Δ%"}
 
     def tickValues(self, minVal, maxVal, size):
-        return [(1.0, [2.5, 1.5, 0.5])]
+        return [(1.0, [3.5, 2.5, 1.5, 0.5])]
 
     def tickStrings(self, values, scale, spacing):
         return [self._LABELS.get(round(v, 1), "") for v in values]
@@ -474,43 +474,49 @@ class StatsAxis(pg.AxisItem):
 
 class GridStatsItem(pg.GraphicsObject):
     """
-    Grid de statistici per lumanare (jos, stil DeepCharts/Sierra): 3 randuri colorate
-    heatmap - ΣV (volum total), ΔV (delta buy-sell), Δ% (delta / volum). Numerele apar
-    la zoom. Randurile: ΣV sus (y 2..3), ΔV mijloc (1..2), Δ% jos (0..1).
+    Grid de statistici per lumanare (jos, stil DeepCharts/Sierra): 4 randuri colorate
+    heatmap - T/s (viteza tape-ului), ΣV (volum total), ΔV (delta buy-sell), Δ% (delta /
+    volum). Numerele apar la zoom. Randurile: T/s sus (y 3..4), ΣV (2..3), ΔV (1..2),
+    Δ% jos (0..1).
     """
 
     def __init__(self):
         super().__init__()
-        self._t = self._vol = self._dv = self._dpct = None
+        self._t = self._vol = self._dv = self._dpct = self._tps = None
         self._w = 1.0
         self._vb = None
         self._maxvol = 1.0
         self._maxdv = 1.0
-        self._bounds = QtCore.QRectF(0, 0, 1, 3)
+        self._maxtps = 1.0
+        self._bounds = QtCore.QRectF(0, 0, 1, 4)
         self._BUCKETS = 20
-        self._vol_br, self._pos_br, self._neg_br = [], [], []
+        self._vol_br, self._pos_br, self._neg_br, self._tps_br = [], [], [], []
         for i in range(self._BUCKETS):
             a = int(35 + 185 * (i / (self._BUCKETS - 1)))
             cv = QtGui.QColor(120, 135, 162); cv.setAlpha(a); self._vol_br.append(pg.mkBrush(cv))
             cp = QtGui.QColor(theme.BUY); cp.setAlpha(a); self._pos_br.append(pg.mkBrush(cp))
             cn = QtGui.QColor(theme.SELL); cn.setAlpha(a); self._neg_br.append(pg.mkBrush(cn))
+            ct = QtGui.QColor(240, 175, 80); ct.setAlpha(a); self._tps_br.append(pg.mkBrush(ct))  # amber = viteza
 
     def attach(self, viewbox):
         self._vb = viewbox
         viewbox.sigXRangeChanged.connect(lambda *a: self.update())
 
-    def set_data(self, t, volume, delta_v, bar_seconds):
+    def set_data(self, t, volume, delta_v, bar_seconds, tps=None):
         self._t = np.asarray(t, dtype=float)
         self._vol = np.asarray(volume, dtype=float)
         self._dv = np.asarray(delta_v, dtype=float)
+        self._tps = (np.asarray(tps, dtype=float) if tps is not None
+                     else np.zeros(len(self._t)))
         self._w = bar_seconds * 0.9
         with np.errstate(divide="ignore", invalid="ignore"):
             self._dpct = np.where(self._vol > 0, self._dv / self._vol * 100.0, 0.0)
         self._maxvol = float(self._vol.max()) if len(self._vol) else 1.0
         self._maxdv = float(np.abs(self._dv).max()) if len(self._dv) else 1.0
+        self._maxtps = float(self._tps.max()) if len(self._tps) else 1.0
         if len(self._t):
             self._bounds = QtCore.QRectF(self._t.min() - self._w, 0,
-                                         (self._t.max() - self._t.min()) + 2 * self._w, 3)
+                                         (self._t.max() - self._t.min()) + 2 * self._w, 4)
         self.prepareGeometryChange()
         self.update()
 
@@ -523,6 +529,8 @@ class GridStatsItem(pg.GraphicsObject):
         nb = self._BUCKETS - 1
         iv = 1.0 / self._maxvol if self._maxvol > 0 else 0.0
         idv = 1.0 / self._maxdv if self._maxdv > 0 else 0.0
+        itps = 1.0 / self._maxtps if self._maxtps > 0 else 0.0
+        has_tps = self._tps is not None and len(self._tps) == len(self._t)
         p.setPen(pg.mkPen(None))
         for i in range(len(self._t)):
             t = self._t[i]
@@ -530,6 +538,9 @@ class GridStatsItem(pg.GraphicsObject):
                 continue
             x = t - w / 2.0
             vol = self._vol[i]; dv = self._dv[i]; dp = self._dpct[i]
+            if has_tps:
+                p.setBrush(self._tps_br[int(min(1.0, self._tps[i] * itps) * nb)])
+                p.drawRect(QtCore.QRectF(x, 3, w, 1))                   # T/s (viteza tape-ului)
             p.setBrush(self._vol_br[int(min(1.0, vol * iv) * nb)])
             p.drawRect(QtCore.QRectF(x, 2, w, 1))                       # ΣV
             p.setBrush((self._pos_br if dv >= 0 else self._neg_br)[int(min(1.0, abs(dv) * idv) * nb)])
@@ -553,7 +564,10 @@ class GridStatsItem(pg.GraphicsObject):
             t = self._t[i]
             if t < xlo or t > xhi:
                 continue
-            vals = ((2.5, _fmt_k(self._vol[i]), theme.TEXT),
+            tps_s = f"{self._tps[i]:.0f}/s" if (self._tps is not None
+                                                and len(self._tps) == len(self._t)) else ""
+            vals = ((3.5, tps_s, theme.ACCENT),
+                    (2.5, _fmt_k(self._vol[i]), theme.TEXT),
                     (1.5, f"{int(round(self._dv[i])):+d}", theme.BUY if self._dv[i] >= 0 else theme.SELL),
                     (0.5, f"{self._dpct[i]:+.0f}%", theme.BUY if self._dpct[i] >= 0 else theme.SELL))
             for row, s, col in vals:

@@ -20,13 +20,15 @@ CHECKPOINT_EVERY = 40   # salvam starea la fiecare N lumanari -> seek inapoi rap
 
 class Replay:
     def __init__(self, full: DayData, df, va_percent, row_size,
-                 big_trade_min=BIG_TRADE_MIN, abs_params=None, exh_params=None):
+                 big_trade_min=BIG_TRADE_MIN, abs_params=None, exh_params=None,
+                 lvn_full_profile=False):
         self.full = full
         self.va = va_percent
         self.row_size = row_size
         self.bar = full.bar_seconds
         self._abs_params = abs_params or {}
         self._exh_params = exh_params or {}
+        self._lvn_full = lvn_full_profile
 
         d = df.sort_values("ts", kind="stable")
         self.prices = d["price"].to_numpy()
@@ -37,6 +39,14 @@ class Replay:
         self.n = len(self.prices)
         self.cidx_of = {int(round(e)): i for i, e in enumerate(full.t)}
         self._big_idx = np.where(self.sizes >= big_trade_min)[0]  # indici tranzactii mari
+        # Speed of tape: nr. de print-uri (trade-uri) per lumanare, aliniat la full.t
+        # (folosit pentru randul T/s din grid, developing tick-cu-tick in replay).
+        if len(self.cepoch):
+            uniq, cnt = np.unique(self.cepoch, return_counts=True)
+            cmap = {int(u): int(c) for u, c in zip(uniq, cnt)}
+            self._full_counts = np.array([cmap.get(int(round(e)), 0) for e in full.t], dtype=float)
+        else:
+            self._full_counts = np.zeros(len(full.t))
         # Pentru fiecare lumânare, cursorul (nr. de tick-uri) la finalul ei -> seek rapid
         self.candle_end = np.searchsorted(self.cepoch, full.t.astype("int64"), side="right")
         self.n_candles = len(full.t)
@@ -185,8 +195,10 @@ class Replay:
             else:
                 bin_buy[k] = bin_sell[k] = total / 2.0
 
-        node_hvn, node_lvn = self.vp.compute_hvn_lvn_peaks(min_prominence_ratio=0.4)
-        hvn, lvn = _top_nodes(node_hvn, node_lvn, vpr.profile)
+        node_hvn, node_lvn = self.vp.compute_hvn_lvn_peaks(
+            min_prominence_ratio=0.4, lvn_within_hvn=not self._lvn_full)
+        hvn, lvn = _top_nodes(node_hvn, node_lvn, vpr.profile,
+                              max_lvn=6 if self._lvn_full else 3)
 
         # Footprint: lumânările închise din full + lumânarea în formare (live)
         fp = {int(round(e)): f.footprint.get(int(round(e)), {}) for e in f.t[:nc]}
@@ -212,6 +224,13 @@ class Replay:
         dev_vah = np.append(f.dev_vah[:nc], cur_vah) if len(f.dev_vah) else np.array([cur_vah])
         dev_val = np.append(f.dev_val[:nc], cur_val) if len(f.dev_val) else np.array([cur_val])
 
+        # Speed of tape (T/s): lumanari inchise = nr. print-uri precalculat; cea in formare =
+        # print-urile hranite pana acum (developing, determinist dupa cursor).
+        start_cur = int(self.candle_end[cc - 1]) if cc > 0 else 0
+        cur_ntrades = float(self.cursor - start_cur)
+        tps_closed = self._full_counts[:nc] if len(self._full_counts) else np.zeros(0)
+        tps = np.append(tps_closed, cur_ntrades) / self.bar
+
         return DayData(
             symbol=f.symbol, n_ticks=self.cursor,
             t=t, open=o, high=h, low=l, close=c, volume=vol,
@@ -225,5 +244,5 @@ class Replay:
             sell_total=der.total_sell_volume,
             mode=f.mode, incomplete=f.incomplete, footprint=fp, big_trades=big,
             absorption=abs0, exhaustion=exh0,
-            dev_poc=dev_poc, dev_vah=dev_vah, dev_val=dev_val,
+            dev_poc=dev_poc, dev_vah=dev_vah, dev_val=dev_val, tps=tps,
         )

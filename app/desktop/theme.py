@@ -41,6 +41,12 @@ PRIOR_POC = "#e0b74e"   # auriu - POC-ul sesiunii precedente (yPOC)
 PRIOR_VA = "#b08a3a"    # auriu inchis - Value Area de ieri (yVAH/yVAL)
 PRIOR_VA_BAND = (224, 183, 78, 26)  # box amber discret peste Value Area de ieri (zona reper NY open)
 PRIOR_HL = "#8a7134"    # amber stins - High/Low sesiune precedenta (PDH/PDL)
+# Profile per-sesiune (Asia / Londra / NY) - culori distincte, muted (context, nu semnal)
+SESS_COLORS = {
+    "Asia":   "#6f7bd6",   # indigo
+    "Londra": "#3f9d7a",   # verde inchis (distinct de verdele viu al lumanarilor)
+    "NY":     "#c76b9c",   # mauve (distinct de magenta POC / mov sell)
+}
 
 QSS = f"""
 QMainWindow, QWidget {{
