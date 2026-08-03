@@ -228,6 +228,13 @@ class FootprintItem(pg.GraphicsObject):
         self._cell_bg = pg.mkBrush(QtGui.QColor(255, 255, 255, 10))
         self._buy_imb_pen = QtGui.QPen(QtGui.QColor(theme.UP_EDGE)); self._buy_imb_pen.setWidthF(1.7); self._buy_imb_pen.setCosmetic(True)
         self._sell_imb_pen = QtGui.QPen(QtGui.QColor(theme.DOWN_EDGE)); self._sell_imb_pen.setWidthF(1.7); self._sell_imb_pen.setCosmetic(True)
+        # POC per lumanare (nivelul cu volumul cel mai mare din bara) - contur magenta (ca linia POC)
+        self._poc_pen = QtGui.QPen(QtGui.QColor(theme.POC)); self._poc_pen.setWidthF(1.8); self._poc_pen.setCosmetic(True)
+        self._poc_of = {}         # {epoca_lumanare: pret POC (nivelul cu volum maxim din bara)}
+        # Numere colorate dupa cine domina in celula: buy verde / sell mov / egal neutru
+        self._num_buy_pen = pg.mkPen(theme.UP_EDGE)
+        self._num_sell_pen = pg.mkPen(theme.DOWN_EDGE)
+        self._num_neutral_pen = pg.mkPen(theme.TEXT_DIM)
         # Pool de brush-uri pe niveluri de alpha (intensitate volum) -> reutilizate
         self._BUCKETS = 24
         self._buy_brushes = []
@@ -261,22 +268,27 @@ class FootprintItem(pg.GraphicsObject):
         ms = 1.0
         tmin = tmax = pmin = pmax = None
         deltas = {}
+        poc_of = {}
         for t, cells in footprint.items():
             if tmin is None or t < tmin: tmin = t
             if tmax is None or t > tmax: tmax = t
             dsum = 0.0
+            best_p, best_v = None, -1.0
             for price, (buy, sell) in cells.items():
                 s = buy + sell
                 if s > mt: mt = s
                 if buy > ms: ms = buy
                 if sell > ms: ms = sell
                 dsum += buy - sell
+                if s > best_v: best_v, best_p = s, price      # POC per lumanare
                 if pmin is None or price < pmin: pmin = price
                 if pmax is None or price > pmax: pmax = price
             deltas[int(t)] = dsum
+            poc_of[int(t)] = best_p
         self._max_total = mt
         self._max_side = ms
         self._deltas = deltas
+        self._poc_of = poc_of
 
         if tmin is not None:
             w, h = self._w, self._h
@@ -358,48 +370,41 @@ class FootprintItem(pg.GraphicsObject):
                     p.setPen(self._buy_imb_pen); p.setBrush(no_brush); p.drawRect(rect); pen_is_no = False
                 elif sell >= MIN_VOL and sell >= RATIO * buy_above:
                     p.setPen(self._sell_imb_pen); p.setBrush(no_brush); p.drawRect(rect); pen_is_no = False
+                if self._poc_of.get(t) == price:   # POC per lumanare: contur magenta (nivelul cu volum max)
+                    p.setPen(self._poc_pen); p.setBrush(no_brush); p.drawRect(rect); pen_is_no = False
 
         # Numerele + delta/lumanare - doar cand celula e destul de mare pe ecran (zoom)
         if xscale <= 0 or yscale <= 0:
             return
         show_numbers = cell_px_w >= 40 and cell_px_h >= 8
-        show_delta = cell_px_w >= 26
-        if not (show_numbers or show_delta):
+        if not show_numbers:
             return
 
         tr = p.transform()
         p.save()
         p.resetTransform()
 
-        if show_numbers:
-            p.setPen(pg.mkPen(theme.TEXT))
-            font = QtGui.QFont()
-            font.setPixelSize(int(max(7, min(13, cell_px_h * 0.75))))
-            p.setFont(font)
-            for t, cells in self._fp.items():
-                if t < xlo or t > xhi:
+        # Numerele "sell x buy", colorate dupa cine domina (buy verde / sell mov / egal neutru).
+        # Delta pe lumanare NU se mai deseneaza aici - e in randul ΔV din grid (evitam dublura).
+        font = QtGui.QFont()
+        font.setPixelSize(int(max(7, min(13, cell_px_h * 0.75))))
+        p.setFont(font)
+        for t, cells in self._fp.items():
+            if t < xlo or t > xhi:
+                continue
+            for price, (buy, sell) in cells.items():
+                if price < ylo or price > yhi:
                     continue
-                for price, (buy, sell) in cells.items():
-                    if price < ylo or price > yhi:
-                        continue
-                    dev = tr.map(QtCore.QPointF(t, price))
-                    rect = QtCore.QRectF(dev.x() - cell_px_w / 2, dev.y() - cell_px_h / 2,
-                                         cell_px_w, cell_px_h)
-                    p.drawText(rect, QtCore.Qt.AlignCenter, f"{int(sell)}x{int(buy)}")
-
-        if show_delta:
-            base_y = tr.map(QtCore.QPointF(float(xmin), ymin)).y()
-            dfont = QtGui.QFont()
-            dfont.setPixelSize(int(max(9, min(13, cell_px_w * 0.16))))
-            dfont.setBold(True)
-            p.setFont(dfont)
-            for t_int, dval in self._deltas.items():
-                if t_int < xlo or t_int > xhi:
-                    continue
-                dev_x = tr.map(QtCore.QPointF(float(t_int), ymin)).x()
-                p.setPen(pg.mkPen(theme.BUY if dval >= 0 else theme.SELL))
-                rect = QtCore.QRectF(dev_x - cell_px_w / 2, base_y - 19, cell_px_w, 15)
-                p.drawText(rect, QtCore.Qt.AlignCenter, f"{int(round(dval)):+d}")
+                if buy > sell:
+                    p.setPen(self._num_buy_pen)
+                elif sell > buy:
+                    p.setPen(self._num_sell_pen)
+                else:
+                    p.setPen(self._num_neutral_pen)
+                dev = tr.map(QtCore.QPointF(t, price))
+                rect = QtCore.QRectF(dev.x() - cell_px_w / 2, dev.y() - cell_px_h / 2,
+                                     cell_px_w, cell_px_h)
+                p.drawText(rect, QtCore.Qt.AlignCenter, f"{int(sell)}x{int(buy)}")
 
         p.restore()
 
