@@ -1,0 +1,22 @@
+# Mediu virtual
+.venv/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Output generat
+output/
+
+# Date (regenerabile din Databento) - NU se urca pe GitHub (mari + nu-s cod)
+# Comenteaza liniile daca vrei totusi sa versionezi datele.
+data/parquet/
+data/raw/
+
+# Streamlit (prototip vechi)
+.streamlit/
+
+# IDE
+.idea/

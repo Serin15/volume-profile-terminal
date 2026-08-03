@@ -1,0 +1,22 @@
+# Volume Profile Platform - dependinte
+# Instalare: python -m venv .venv && .venv\Scripts\pip install -r requirements.txt
+
+# Date: incarcare rapida + Parquet
+pandas
+pyarrow
+
+# Vizualizare
+matplotlib
+plotly
+streamlit
+
+# Backend platforma (Faza 2)
+fastapi
+uvicorn
+
+# Desktop app (GUI nativ, real-time)
+PySide6
+pyqtgraph
+
+# Teste
+pytest
