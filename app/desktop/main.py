@@ -143,8 +143,8 @@ class StatCard(QtWidgets.QFrame):
         super().__init__()
         self.setObjectName("StatCard")
         lay = QtWidgets.QVBoxLayout(self)
-        lay.setContentsMargins(12, 8, 12, 8)
-        lay.setSpacing(2)
+        lay.setContentsMargins(12, 5, 12, 5)
+        lay.setSpacing(1)
         self._l = QtWidgets.QLabel(label); self._l.setObjectName("StatLabel")
         self._v = QtWidgets.QLabel("—"); self._v.setObjectName("StatValue")
         lay.addWidget(self._l); lay.addWidget(self._v)
@@ -255,7 +255,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_topbar(self):
         bar = QtWidgets.QWidget(); bar.setObjectName("TopBar")
         lay = QtWidgets.QHBoxLayout(bar)
-        lay.setContentsMargins(16, 8, 16, 8); lay.setSpacing(12)
+        lay.setContentsMargins(16, 5, 16, 5); lay.setSpacing(12)
 
         title = QtWidgets.QLabel("Volume Profile Terminal"); title.setObjectName("Title")
         lay.addWidget(title)
@@ -603,7 +603,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_stats(self):
         wrap = QtWidgets.QWidget()
         lay = QtWidgets.QHBoxLayout(wrap)
-        lay.setContentsMargins(16, 10, 16, 6); lay.setSpacing(10)
+        lay.setContentsMargins(16, 4, 16, 4); lay.setSpacing(10)
         self.card_symbol = StatCard("Simbol")
         self.card_poc = StatCard("POC")
         self.card_va = StatCard("VAH / VAL")
@@ -1708,16 +1708,23 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg.show(); dlg.raise_()
 
     def _on_grid_toggled(self, *a):
-        """Arata/ascunde grid-ul de statistici. Axa de timp ramane jos (nu ascundem plot-ul)."""
+        """Arata/ascunde grid-ul de statistici. Axa de timp ramane jos (nu ascundem plot-ul).
+        Cand e stins, ascundem si etichetele T/s/ΣV/ΔV/Δ% (nu mai stau agatate degeaba)."""
         show = self.chk_grid.isChecked()
         self.grid_stats.setVisible(show)
-        self.glw.ci.layout.setRowStretchFactor(2, 1 if show else 0)
+        self.grid_plot.getAxis("left").setStyle(showValues=show)   # latimea ramane fixa (34) -> aliniere ok
+        lay = self.glw.ci.layout
+        lay.setRowStretchFactor(2, 1 if show else 0)
+        # Cand e stins, colapsam randul la inaltimea axei de timp -> pretul ia spatiul liber
+        lay.setRowMaximumHeight(2, 16777215 if show else 30)
 
     def _on_cvd_toggled(self, *a):
         """Arata/ascunde panoul CVD (row 1). Axa de timp e pe grid (row 2), deci nu o afecteaza."""
         show = self.chk_cvd.isChecked()
         self.cvd_plot.setVisible(show)
-        self.glw.ci.layout.setRowStretchFactor(1, 1 if show else 0)
+        lay = self.glw.ci.layout
+        lay.setRowStretchFactor(1, 1 if show else 0)
+        lay.setRowMaximumHeight(1, 16777215 if show else 0)   # colapseaza randul CVD cand e stins
 
     def _on_compare_changed(self, *a):
         """Session Browser + Compare: suprapune profilul + nivelurile unei alte sesiuni
@@ -1881,7 +1888,7 @@ def main():
     app.setStyle("Fusion")
     app.setStyleSheet(theme.QSS)
     win = MainWindow()
-    win.show()
+    win.showMaximized()   # porneste pe tot ecranul (graficul se intinde), nu 1500x900
     return app, win
 
 
