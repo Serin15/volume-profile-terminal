@@ -1179,6 +1179,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cross_label.setText(txt)
         self.cross_label.setPos(snapped, pt.y())
         self._update_level_tip(vb, pt)
+        self._marker_hover_at(vb, pt)   # tooltip markere (livrat MANUAL, vezi metoda)
+
+    def _marker_hover_at(self, vb, pt):
+        """Tooltip pe markere (Big Trades / Absorption / Exhaustion) livrat MANUAL din
+        sigMouseMoved. Motiv: pyqtgraph 0.14 / PySide6 nu mai livreaza hoverEvent la
+        ScatterPlotItem, deci sigHovered nu se declanseaza. Detectam proximitatea in px."""
+        try:
+            xs, ys = vb.viewPixelSize()
+        except Exception:
+            xs = ys = 0.0
+        if xs <= 0 or ys <= 0:
+            self.hover_card.setVisible(False)
+            return
+        best = None
+        best_d = 1e18
+        for sc in (self.abs_scatter, self.exh_scatter, self.big_scatter):
+            if not sc.isVisible():
+                continue
+            for p in sc.points():
+                pos = p.pos()
+                dx = (pt.x() - pos.x()) / xs
+                dy = (pt.y() - pos.y()) / ys
+                d = (dx * dx + dy * dy) ** 0.5
+                if d < best_d:
+                    best_d, best = d, (sc, p)
+        if best is not None and best_d <= 13.0:      # in ~13 px de un marker -> arata cardul
+            self._on_marker_hover(best[0], [best[1]], None)
+        else:
+            self.hover_card.setVisible(False)
 
     def _update_level_tip(self, vb, pt):
         """Hover pe linii: daca cursorul e langa o linie de nivel, arata nume + pret."""
