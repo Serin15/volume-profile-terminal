@@ -326,7 +326,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_cvd = QtWidgets.QCheckBox("CVD"); self.chk_cvd.setChecked(True)
         self.chk_cvd.setToolTip("Panoul Cumulative Delta (jos): presiunea neta agresiva de-a lungul sesiunii")
 
-        lay.addWidget(self._field("ZIUA", self.cbo_day))
+        # ZIUA + buton "deschide fisier de ORIUNDE" (CSV/Parquet, ex. direct de pe Desktop)
+        self.btn_open = QtWidgets.QToolButton(); self.btn_open.setText("📂")
+        self.btn_open.setObjectName("GearBtn")
+        self.btn_open.setToolTip("Deschide un fișier de date de ORIUNDE (CSV / Parquet) —\n"
+                                 "ex. direct de pe Desktop, fără conversie sau git")
+        self.btn_open.clicked.connect(self._open_data_file)
+        daybox = QtWidgets.QWidget(); dv = QtWidgets.QVBoxLayout(daybox)
+        dv.setContentsMargins(0, 0, 0, 0); dv.setSpacing(1)
+        dl = QtWidgets.QLabel("ZIUA"); dl.setObjectName("FieldLabel"); dv.addWidget(dl)
+        drow = QtWidgets.QHBoxLayout(); drow.setContentsMargins(0, 0, 0, 0); drow.setSpacing(4)
+        drow.addWidget(self.cbo_day); drow.addWidget(self.btn_open)
+        dv.addLayout(drow); lay.addWidget(daybox)
         lay.addWidget(self._sep())
         # Tip + ⚙ footprint
         tipbox = QtWidgets.QWidget(); tv = QtWidgets.QVBoxLayout(tipbox)
@@ -599,6 +610,26 @@ class MainWindow(QtWidgets.QMainWindow):
                          (self.chk_cvd, "cvd"), (self.chk_prior, "prior"),
                          (self.chk_session, "session"), (self.chk_sess, "sess")):
             chk.setChecked(v[key])
+
+    def _open_data_file(self):
+        """Deschide un fisier de date de ORIUNDE (CSV / Parquet) - ex. direct de pe Desktop -
+        fara conversie sau git. Il adauga in lista ZIUA si il selecteaza -> se incarca pe loc.
+        (CSV se citeste direct; e putin mai lent decat parquet, dar merge instant.)"""
+        start = os.path.join(os.path.expanduser("~"), "Desktop")
+        if not os.path.isdir(start):
+            start = os.path.expanduser("~")
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Deschide fișier de date (CSV / Parquet)", start,
+            "Date Databento (*.parquet *.csv);;Toate fișierele (*.*)")
+        if not path:
+            return
+        path = os.path.normpath(path)
+        for i in range(self.cbo_day.count()):
+            if self.cbo_day.itemData(i) == path:
+                self.cbo_day.setCurrentIndex(i)          # deja deschis -> doar selecteaza
+                return
+        self.cbo_day.addItem("📂 " + nice_label(os.path.basename(path)), userData=path)
+        self.cbo_day.setCurrentIndex(self.cbo_day.count() - 1)   # -> declanseaza _reload
 
     def _build_stats(self):
         wrap = QtWidgets.QWidget()

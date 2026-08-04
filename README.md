@@ -112,7 +112,14 @@ git add -A && git commit -m "descriere" && git push    # trimiti la final
 
 Datele NU se sincronizează prin git (sunt în `.gitignore`) — le muți manual sau le redescarci.
 
-## Adăugare zile noi de date
+## Deschidere rapidă a unui fișier de oriunde
+
+Butonul **📂** (lângă ZIUA) deschide orice fișier CSV/Parquet de **oriunde** (ex. direct de
+pe Desktop) — se încarcă pe loc, fără conversie și fără git. CSV-ul se citește direct (puțin
+mai lent decât Parquet, dar instant ca flux). Util pentru a arunca un ochi pe o zi descărcată
+proaspăt, fără s-o adaugi în proiect.
+
+## Adăugare zile noi de date (permanent, sincronizat pe git)
 
 Datele nu sunt în repo (regenerabile din Databento). Pui CSV-ul în `data/raw/`, apoi:
 
