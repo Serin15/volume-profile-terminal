@@ -22,7 +22,7 @@ from data.loader import PARQUET_DIR, RAW_DIR
 from app.desktop import theme
 from app.desktop.data_service import (load_day, INTERVAL_SECONDS, resolve_ticks,
                                       prior_session_levels, profile_from_footprint,
-                                      session_profiles, SESSION_DEFS,
+                                      session_profiles, SESSION_DEFS, TICK_SIZE,
                                       BIG_TRADE_MIN, ABS_MIN_VOL, ABS_DOM, ABS_REJECT,
                                       EXH_WINDOW, EXH_VOL_MULT, EXH_DELTA_FRAC)
 from app.desktop.charts import (CandlestickItem, ProfileOverlayItem, FootprintItem,
@@ -954,15 +954,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.draw_group = QtWidgets.QButtonGroup(self)
         self.draw_group.setExclusive(True)
-        tools = [("⤢", None, "Cursor (fara unealta)"),
-                 ("─", "hline", "Nivel orizontal (1 click, mobil)"),
-                 ("╱", "trend", "Trendline (2 clickuri, editabil)"),
-                 ("▭", "rect", "Dreptunghi / zona (2 clickuri, mut + redimensionez)"),
-                 ("Fib", "fib", "Fibonacci retracement (2 clickuri)"),
-                 ("↔", "measure", "Masura: puncte/ticks/%/timp (2 clickuri)"),
-                 ("L", "long", "Long: 3 clickuri = Entry, Stop, Target (puncte + R:R + $)"),
-                 ("S", "short", "Short: 3 clickuri = Entry, Stop, Target (puncte + R:R + $)"),
-                 ("aV", "avwap", "Anchored VWAP: 1 click = ancora (ex. NY open) -> VWAP + benzi std-dev de la acel punct")]
+        tools = [("⤢", None, "<b>Cursor</b><br>Fără unealtă · pan · click pe lumânare = Bar Info"),
+                 ("─", "hline", "<b>Nivel orizontal</b><br>1 click → linie mobilă la preț"),
+                 ("╱", "trend", "<b>Trendline</b><br>2 clickuri → segment editabil (mânere)"),
+                 ("▭", "rect", "<b>Dreptunghi / zonă</b><br>2 clickuri → cutie (supply/demand), mut + redimensionez"),
+                 ("Fib", "fib", "<b>Fibonacci retracement</b><br>2 clickuri (swing) → nivelurile fib"),
+                 ("↔", "measure", "<b>Măsură</b><br>2 clickuri → puncte / ticks / % / timp"),
+                 ("L", "long", "<b>Long Position</b><br>1 click = Entry; Stop + Target apar automat și le TRAGI → R:R + $ live"),
+                 ("S", "short", "<b>Short Position</b><br>1 click = Entry; Stop + Target apar automat și le TRAGI → R:R + $ live"),
+                 ("aV", "avwap", "<b>Anchored VWAP</b><br>1 click = ancoră (ex. NY open) → VWAP + benzi std-dev de acolo")]
         self._tool_btns = {}
         for label, tool, tip in tools:
             b = QtWidgets.QPushButton(label)
@@ -1137,7 +1137,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.level_tip.setZValue(60)
         self.level_tip.setVisible(False)
         self.price.addItem(self.level_tip, ignoreBounds=True)
+        # Bar Info: panou care apare la CLICK pe o lumanare (OHLC + order flow al barei)
+        self.bar_info = pg.TextItem(anchor=(0, 0), fill=pg.mkBrush(16, 18, 26, 238),
+                                    border=pg.mkPen(theme.BORDER))
+        self.bar_info.setZValue(62)
+        self.bar_info.setVisible(False)
+        self.price.addItem(self.bar_info, ignoreBounds=True)
         self.price.scene().sigMouseMoved.connect(self._on_mouse)
+        self.price.scene().sigMouseClicked.connect(self._on_chart_click)
 
     def _on_mouse(self, pos):
         vb = self.price.getViewBox()
@@ -1212,11 +1219,96 @@ class MainWindow(QtWidgets.QMainWindow):
         self.level_tip.setPos(pt.x(), price)
         self.level_tip.setVisible(True)
 
+    # ---------- Bar Info (click pe o lumanare) ----------
+    def _on_chart_click(self, ev):
+        """Click pe grafic (cand NU desenezi) -> panou Bar Info cu OHLC + order flow-ul barei."""
+        if self.draw_mgr.tool is not None:      # desenam -> lasa DrawingManager sa preia
+            return
+        try:
+            if ev.button() != QtCore.Qt.LeftButton:
+                return
+        except Exception:
+            pass
+        d = self._data
+        if d is None or not len(d.t):
+            return
+        if not self.price.sceneBoundingRect().contains(ev.scenePos()):
+            return
+        pt = self.price.getViewBox().mapSceneToView(ev.scenePos())
+        i = int(np.argmin(np.abs(d.t - float(pt.x()))))   # lumanarea cea mai apropiata
+        self._show_bar_info(i)
+
+    def _show_bar_info(self, i):
+        """Panou cu radiografia lumanarii i: OHLC, range/body/wick, volum, trades,
+        Average Trade Size, delta/delta%, Efficiency (volum/tick) + distanta POC/VWAP."""
+        d = self._data
+        o, h, l, c = float(d.open[i]), float(d.high[i]), float(d.low[i]), float(d.close[i])
+        vol = float(d.volume[i]); rng = h - l; body = abs(c - o)
+        uw = h - max(o, c); lw = min(o, c) - l
+        trades = float(d.tps[i]) * d.bar_seconds if len(getattr(d, "tps", [])) > i else 0.0
+        avg = vol / trades if trades > 0 else 0.0
+        dv = np.diff(d.cvd, prepend=0.0) if len(d.cvd) else np.zeros(len(d.t))
+        delta = float(dv[i]) if i < len(dv) else 0.0
+        dpct = (delta / vol * 100.0) if vol else 0.0
+        rng_t = rng / TICK_SIZE if TICK_SIZE else 0.0
+        eff = vol / rng_t if rng_t > 0 else 0.0
+        # Efficiency relativa la ziua asta (efort vs rezultat) -> descriptor onest, data-driven
+        rall = (d.high - d.low) / TICK_SIZE
+        with np.errstate(divide="ignore", invalid="ignore"):
+            eall = np.where(rall > 0, d.volume / rall, 0.0)
+        emed = float(np.median(eall[eall > 0])) if np.any(eall > 0) else 0.0
+        eff_tag = ""
+        if emed > 0 and eff > 0:
+            r = eff / emed
+            eff_tag = "efort mare" if r >= 1.7 else ("eficient" if r <= 0.6 else "")
+        d_poc = c - (d.poc or 0.0)
+        vw = float(d.vwap[i]) if (i < len(d.vwap) and not np.isnan(d.vwap[i])) else None
+        tstr = datetime.datetime.fromtimestamp(int(d.t[i]) + self._tz_offset,
+                                               datetime.timezone.utc).strftime("%d.%m %H:%M")
+        up = c >= o
+        dc = theme.UP if delta >= 0 else theme.DOWN
+        cc = theme.UP if up else theme.DOWN
+        dim = theme.TEXT_DIM
+
+        def k(v):
+            return f"{v/1000:.1f}K" if abs(v) >= 1000 else f"{v:.0f}"
+
+        html = (
+            f'<div style="font-family:Consolas,monospace; font-size:11px; color:{theme.TEXT}; line-height:150%">'
+            f'<b>{tstr}</b>&nbsp; <span style="color:{cc}">{"▲" if up else "▼"} {c:.2f}</span><br>'
+            f'<span style="color:{dim}">O</span> {o:.2f}&nbsp; <span style="color:{dim}">H</span> {h:.2f}&nbsp; '
+            f'<span style="color:{dim}">L</span> {l:.2f}<br>'
+            f'<span style="color:{dim}">Range</span> {rng:.2f} ({rng_t:.0f}t)&nbsp; '
+            f'<span style="color:{dim}">Body</span> {body:.2f}<br>'
+            f'<span style="color:{dim}">Wick</span> ↑{uw:.2f} ↓{lw:.2f}<br>'
+            f'<span style="color:{dim}">Vol</span> {k(vol)}&nbsp; '
+            f'<span style="color:{dim}">Trades</span> {trades:.0f}&nbsp; '
+            f'<span style="color:{dim}">Avg</span> {avg:.1f}<br>'
+            f'<span style="color:{dim}">Δ</span> <span style="color:{dc}">{delta:+.0f} ({dpct:+.0f}%)</span><br>'
+            f'<span style="color:{dim}">Eff</span> {eff:.0f} c/tick'
+            + (f' <span style="color:{theme.ACCENT}">· {eff_tag}</span>' if eff_tag else '') + '<br>'
+            f'<span style="color:{dim}">POC</span> {d_poc:+.1f}'
+            + (f'&nbsp; <span style="color:{dim}">VWAP</span> {c - vw:+.1f}' if vw is not None else '')
+            + '</div>'
+        )
+        self.bar_info.setHtml(html)
+        self.bar_info.setVisible(True)
+        self._position_bar_info()
+
+    def _position_bar_info(self):
+        """Fixeaza panoul in coltul STANGA-SUS al vederii (se re-aliniaza la zoom/pan)."""
+        if not getattr(self, "bar_info", None) or not self.bar_info.isVisible():
+            return
+        (xmin, xmax), (ymin, ymax) = self.price.getViewBox().viewRange()
+        self.bar_info.setPos(xmin + (xmax - xmin) * 0.012, ymax - (ymax - ymin) * 0.02)
+
     # ---------- Incarcare date ----------
     def _reload(self):
         fname = self.cbo_day.currentData()
         if not fname:
             return
+        if getattr(self, "bar_info", None):
+            self.bar_info.setVisible(False)   # ascunde Bar Info vechi la schimbarea zilei/perioadei
         per = self.cbo_period.currentText()
         if per.startswith("Zi UTC"):
             self._mode, self._span = "utc", "day"
@@ -1338,6 +1430,7 @@ class MainWindow(QtWidgets.QMainWindow):
         zoom in (Footprint) = celule footprint (cu delta/Bid×Ask dupa marimea celulei).
         Cand Auto e off, checkbox-urile decid (comportament manual).
         """
+        self._position_bar_info()   # panoul Bar Info ramane in coltul stanga-sus la zoom/pan
         is_fp = self.cbo_type.currentText() == "Footprint"
         if not self.chk_auto.isChecked() or self._data is None or not len(self._data.t):
             self.footprint_item.setVisible(is_fp)
