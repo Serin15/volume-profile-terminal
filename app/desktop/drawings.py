@@ -46,7 +46,7 @@ class DrawingManager(QtCore.QObject):
 
     # cate clickuri are nevoie fiecare unealta
     NEEDED = {"hline": 1, "trend": 2, "rect": 2, "fib": 2, "measure": 2,
-              "long": 3, "short": 3, "avwap": 1}
+              "long": 1, "short": 1, "avwap": 1}   # long/short: 1 click = Entry, restul mobil
 
     # ---------- stare unealta ----------
     def set_tool(self, tool):
@@ -225,41 +225,59 @@ class DrawingManager(QtCore.QObject):
         self._register([line, band, label])
 
     def _add_position(self, pts, kind):
-        """Simulare trade (ca 'Long/Short Position' pe TV): 3 clickuri = Entry, Stop, Target.
-        Zona verde = profit (spre target), rosie = risc (spre stop); eticheta cu puncte + R:R + $."""
-        entry, stop, target = pts[0][1], pts[1][1], pts[2][1]
-        xs = [p[0] for p in pts]
-        x0, x1 = min(xs), max(xs)
-        risk = abs(entry - stop)
-        reward = abs(target - entry)
-        rr = reward / risk if risk > 1e-9 else 0.0
-        green = QtGui.QColor(theme.UP); green.setAlpha(45)
-        red = QtGui.QColor(POS_RED); red.setAlpha(45)
-        group = []
+        """Long / Short Position stil TradingView: 1 click = Entry; Stop + Target apar
+        automat (R:R 1:2 implicit). Toate 3 nivelurile sunt MOBILE - tragi de linie si
+        zonele verde (profit) / rosu (risc) + eticheta (R:R, puncte, $) se actualizeaza LIVE."""
+        entry = pts[0][1]
+        x0 = pts[0][0]
+        try:
+            (vx0, vx1), _ = self.vb.viewRange()
+            box_w = max((vx1 - vx0) * 0.30, 1.0)      # latimea "cutiei" ~ 30% din ce vezi
+        except Exception:
+            box_w = 3600.0
+        x1 = x0 + box_w
+        risk0 = max(abs(entry) * 0.0006, 20 * TICK_SIZE)   # risc implicit (cateva puncte pe NQ)
+        if kind == "long":
+            stop, target = entry - risk0, entry + 2 * risk0
+        else:
+            stop, target = entry + risk0, entry - 2 * risk0
 
-        def zone(y_from, y_to, brush):
-            yy0, yy1 = sorted((y_from, y_to))
-            r = QtWidgets.QGraphicsRectItem(x0, yy0, x1 - x0, yy1 - yy0)
-            r.setPen(pg.mkPen(None)); r.setBrush(pg.mkBrush(brush)); r.setZValue(1)
-            self.plot.addItem(r); group.append(r)
+        green = QtGui.QColor(theme.UP); green.setAlpha(40)
+        red = QtGui.QColor(POS_RED); red.setAlpha(40)
+        prof = QtWidgets.QGraphicsRectItem(); prof.setPen(pg.mkPen(None))
+        prof.setBrush(pg.mkBrush(green)); prof.setZValue(1); self.plot.addItem(prof)
+        risk = QtWidgets.QGraphicsRectItem(); risk.setPen(pg.mkPen(None))
+        risk.setBrush(pg.mkBrush(red)); risk.setZValue(1); self.plot.addItem(risk)
 
-        zone(entry, target, green)     # profit
-        zone(entry, stop, red)         # risc
-        for y, col, w in ((entry, theme.TEXT, 1.5), (target, theme.UP, 1),
-                          (stop, POS_RED, 1)):
-            seg = pg.PlotDataItem([x0, x1], [y, y], pen=pg.mkPen(col, width=w))
-            seg.setZValue(20); self.plot.addItem(seg); group.append(seg)
+        def mkline(y, col, w):
+            ln = pg.InfiniteLine(pos=y, angle=0, movable=True,
+                                 pen=pg.mkPen(col, width=w),
+                                 hoverPen=pg.mkPen(col, width=w + 1.5))
+            ln.setZValue(20); self.plot.addItem(ln); return ln
+        entry_line = mkline(entry, theme.TEXT, 1.6)
+        target_line = mkline(target, theme.UP, 1.2)
+        stop_line = mkline(stop, POS_RED, 1.2)
 
         tag = "LONG" if kind == "long" else "SHORT"
-        label = pg.TextItem(
-            f"{tag}   R:R 1:{rr:.2f}\n"
-            f"target +{reward:.2f} pts  (${reward * NQ_POINT_USD:,.0f})\n"
-            f"stop  -{risk:.2f} pts  (${risk * NQ_POINT_USD:,.0f})",
-            color="#0a0a0a", anchor=(0, 0.5),
-            fill=pg.mkBrush(QtGui.QColor(theme.UP if kind == "long" else theme.DOWN)))
-        label.setPos(x1, entry); label.setZValue(22)
-        self.plot.addItem(label); group.append(label)
-        self._register(group)
+        fillc = QtGui.QColor(theme.UP if kind == "long" else theme.DOWN)
+        label = pg.TextItem(color="#0a0a0a", anchor=(0, 0.5), fill=pg.mkBrush(fillc))
+        label.setZValue(22); self.plot.addItem(label)
+
+        def redraw(*_):
+            e, s, tg = entry_line.value(), stop_line.value(), target_line.value()
+            for r, yb in ((prof, tg), (risk, s)):
+                yy0, yy1 = sorted((e, yb))
+                r.setRect(x0, yy0, x1 - x0, yy1 - yy0)
+            rk, rw = abs(e - s), abs(tg - e)
+            rr = rw / rk if rk > 1e-9 else 0.0
+            label.setText(f"{tag}   R:R 1:{rr:.2f}\n"
+                          f"target +{rw:.2f} pts  (${rw * NQ_POINT_USD:,.0f})\n"
+                          f"stop  -{rk:.2f} pts  (${rk * NQ_POINT_USD:,.0f})")
+            label.setPos(x1, e)
+        for ln in (entry_line, stop_line, target_line):
+            ln.sigPositionChanged.connect(redraw)
+        redraw()
+        self._register([prof, risk, entry_line, target_line, stop_line, label])
 
     # ---------- undo / clear ----------
     def _remove(self, entry):
