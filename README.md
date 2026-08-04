@@ -83,15 +83,14 @@ python -m venv .venv
 .venv\Scripts\pip install -e .        # face import-urile core/data/app sa mearga peste tot
 ```
 
-**4. Adu-ți datele** (aplicația are nevoie de cel puțin o zi ca să pornească):
-- **Cel mai simplu** — copiază folderul `data\parquet\` de pe PC-ul vechi (USB / cloud) în același loc.
-  (Doar `.parquet` e suficient; `.csv`-urile brute din `data\raw\` sunt opționale.)
-- **Sau** descarcă zile noi din Databento — vezi „Adăugare zile noi de date" mai jos.
+**4. Datele vin cu clonarea** — folderul `data/parquet/` (mic, ~55MB) e versionat pe git,
+deci după `git clone` ai deja zilele descărcate. Nu trebuie să copiezi nimic manual.
+(CSV-urile brute din `data/raw/`, ~767MB, NU sunt pe git — sunt regenerabile și opționale.)
 
 Gata. Data viitoare pornești cu **`start.bat`**.
 
-> **Notă:** pe alt PC ai nevoie doar de codul din GitHub + folderul `data\parquet\`. Restul (`.venv`,
-> pachete) se recreează cu `setup.bat`. Ce modifici pe un PC → `git add/commit/push`, pe celălalt → `git pull`.
+> **Notă:** pe alt PC clonezi repo-ul (cod + date parquet), rulezi `setup.bat` (recreează `.venv` +
+> pachete) și ai totul. Ce modifici/descarci pe un PC → `git add/commit/push`, pe celălalt → `git pull`.
 
 ## Rulare
 

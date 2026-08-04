@@ -10,10 +10,10 @@ __pycache__/
 # Output generat
 output/
 
-# Date (regenerabile din Databento) - NU se urca pe GitHub (mari + nu-s cod)
-# Comenteaza liniile daca vrei totusi sa versionezi datele.
-data/parquet/
+# Date brute CSV (mari, ~767MB, regenerabile din Databento) - NU se urca pe GitHub.
 data/raw/
+# NOTA: data/parquet/ (mic, ~55MB, fisiere <5MB) SE versioneaza intentionat ->
+# pe un PC nou datele vin automat cu `git clone` (fara copiere manuala).
 
 # Streamlit (prototip vechi)
 .streamlit/
