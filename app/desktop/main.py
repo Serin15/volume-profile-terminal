@@ -154,6 +154,24 @@ class StatCard(QtWidgets.QFrame):
         self._v.setStyleSheet(f"color:{color};" if color else "")
 
 
+# Vederi (preset-uri de straturi): un click aprinde un set curat, gandit, in loc de
+# 15 bife. Cheile = starea checkbox-urilor + tipul (Profil/Footprint) + Auto.
+VIEWS = {
+    "Curat": dict(type="Profil", auto=True, vp=True, nodes=False, vwap=True, dev=False,
+                  big=False, abs=False, exh=False, grid=False, cvd=False,
+                  prior=False, session=False, sess=False),
+    "Order Flow": dict(type="Footprint", auto=True, vp=False, nodes=False, vwap=False, dev=False,
+                       big=True, abs=True, exh=True, grid=True, cvd=True,
+                       prior=False, session=False, sess=False),
+    "NY Open": dict(type="Profil", auto=True, vp=True, nodes=True, vwap=False, dev=False,
+                    big=True, abs=True, exh=False, grid=False, cvd=True,
+                    prior=True, session=True, sess=True),
+    "Tot": dict(type="Footprint", auto=True, vp=True, nodes=True, vwap=True, dev=True,
+                big=True, abs=True, exh=True, grid=True, cvd=True,
+                prior=True, session=True, sess=True),
+}
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -252,6 +270,11 @@ class MainWindow(QtWidgets.QMainWindow):
         for f in discover_files():
             self.cbo_compare.addItem(nice_label(f), userData=f)
         self.cbo_type = QtWidgets.QComboBox(); self.cbo_type.addItems(["Profil", "Footprint"])
+        # Vederi (preset-uri de straturi) - un click = un set curat, gandit
+        self.cbo_view = QtWidgets.QComboBox()
+        self.cbo_view.addItems(["Vedere ▾", "Curat", "Order Flow", "NY Open", "Tot"])
+        self.cbo_view.setToolTip("Aprinde un set gandit de straturi (in loc de 15 bife):\n"
+                                 "Curat · Order Flow · NY Open (strategia ta) · Tot")
         self.cbo_interval = QtWidgets.QComboBox()
         self.cbo_interval.addItems(list(INTERVAL_SECONDS.keys()))
         self.cbo_interval.setCurrentText("5min")
@@ -326,6 +349,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cbo_va.currentIndexChanged.connect(self._reload_keep)
         self.cbo_res.currentIndexChanged.connect(self._reload_keep)
         self.cbo_type.currentIndexChanged.connect(self._rerender_current)    # Profil/Footprint = doar vizual
+        self.cbo_view.currentIndexChanged.connect(self._on_view_changed)     # preset-uri de straturi
         self.chk_nodes.stateChanged.connect(self._rerender_current)
         self.chk_vp.stateChanged.connect(self._rerender_current)
         self.chk_auto.stateChanged.connect(self._apply_lod)
@@ -488,6 +512,9 @@ class MainWindow(QtWidgets.QMainWindow):
         bar = QtWidgets.QWidget(); bar.setObjectName("LayerBar")
         lay = QtWidgets.QHBoxLayout(bar)
         lay.setContentsMargins(10, 4, 10, 4); lay.setSpacing(8)
+        vlbl = QtWidgets.QLabel("VEDERE"); vlbl.setObjectName("FieldLabel")
+        lay.addWidget(vlbl); lay.addWidget(self.cbo_view)
+        lay.addWidget(self._sep())
         lbl = QtWidgets.QLabel("STRATURI"); lbl.setObjectName("FieldLabel")
         lay.addWidget(lbl)
         lay.addWidget(self.chk_auto)                                   # Smart Layers
@@ -553,6 +580,25 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_fp_shape_changed(self, idx):
         self.footprint_item.set_shape("bubbles" if idx == 1 else "cells")
+
+    def _on_view_changed(self, idx):
+        """Preset de straturi: idx 0 = placeholder (nu face nimic)."""
+        if idx <= 0:
+            return
+        self._apply_view(self.cbo_view.currentText())
+
+    def _apply_view(self, name):
+        """Aprinde setul de straturi al unei Vederi (Curat / Order Flow / NY Open / Tot)."""
+        v = VIEWS.get(name)
+        if not v:
+            return
+        self.cbo_type.setCurrentText(v["type"])
+        for chk, key in ((self.chk_auto, "auto"), (self.chk_vp, "vp"), (self.chk_nodes, "nodes"),
+                         (self.chk_vwap, "vwap"), (self.chk_dev, "dev"), (self.chk_big, "big"),
+                         (self.chk_abs, "abs"), (self.chk_exh, "exh"), (self.chk_grid, "grid"),
+                         (self.chk_cvd, "cvd"), (self.chk_prior, "prior"),
+                         (self.chk_session, "session"), (self.chk_sess, "sess")):
+            chk.setChecked(v[key])
 
     def _build_stats(self):
         wrap = QtWidgets.QWidget()
