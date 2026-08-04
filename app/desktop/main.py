@@ -1221,22 +1221,26 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------- Bar Info (click pe o lumanare) ----------
     def _on_chart_click(self, ev):
-        """Click pe grafic (cand NU desenezi) -> panou Bar Info cu OHLC + order flow-ul barei."""
+        """DUBLU-click pe o lumanare -> panou Bar Info. Click SIMPLU -> il ascunde
+        (nu mai ramane permanent pe ecran)."""
         if self.draw_mgr.tool is not None:      # desenam -> lasa DrawingManager sa preia
             return
-        try:
-            if ev.button() != QtCore.Qt.LeftButton:
-                return
-        except Exception:
-            pass
         d = self._data
         if d is None or not len(d.t):
             return
         if not self.price.sceneBoundingRect().contains(ev.scenePos()):
             return
-        pt = self.price.getViewBox().mapSceneToView(ev.scenePos())
-        i = int(np.argmin(np.abs(d.t - float(pt.x()))))   # lumanarea cea mai apropiata
-        self._show_bar_info(i)
+        is_double = False
+        try:
+            is_double = bool(ev.double())
+        except Exception:
+            pass
+        if is_double:
+            pt = self.price.getViewBox().mapSceneToView(ev.scenePos())
+            i = int(np.argmin(np.abs(d.t - float(pt.x()))))   # lumanarea cea mai apropiata
+            self._show_bar_info(i)
+        else:
+            self.bar_info.setVisible(False)                   # click simplu = ascunde
 
     def _show_bar_info(self, i):
         """Panou cu radiografia lumanarii i: OHLC, range/body/wick, volum, trades,
@@ -1442,12 +1446,13 @@ class MainWindow(QtWidgets.QMainWindow):
         (xmin, xmax), _ = self.price.getViewBox().viewRange()
         vis = float(xmax - xmin) / self._data.bar_seconds    # cate lumanari sunt vizibile
         fp_show = bool(is_fp and vis <= 220)                  # footprint pana la zoom mediu (heatmap compact); apoi lumanari
-        markers = bool(vis <= 110)                            # Big Trades + Absorption + Exhaustion la zoom mediu+
         self.footprint_item.setVisible(fp_show)
         self.candles.setVisible(not fp_show)
-        self.big_scatter.setVisible(bool(markers and self.chk_big.isChecked()))
-        self.abs_scatter.setVisible(bool(markers and self.chk_abs.isChecked()))
-        self.exh_scatter.setVisible(bool(markers and self.chk_exh.isChecked()))
+        # Markerele (Big Trades / Absorption / Exhaustion) sunt rare si importante -> MEREU
+        # vizibile cand stratul e pornit (indiferent de zoom), ca sa le vezi + sa le poti hover-ui.
+        self.big_scatter.setVisible(self.chk_big.isChecked())
+        self.abs_scatter.setVisible(self.chk_abs.isChecked())
+        self.exh_scatter.setVisible(self.chk_exh.isChecked())
 
     def _reload_keep(self):
         """Reload care PASTREAZA pozitia din replay + zoom-ul (interval/VA%/rezolutie)."""
