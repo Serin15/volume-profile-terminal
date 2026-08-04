@@ -403,7 +403,7 @@ class FootprintItem(pg.GraphicsObject):
         # Numerele + delta/lumanare - doar cand celula e destul de mare pe ecran (zoom)
         if xscale <= 0 or yscale <= 0:
             return
-        show_numbers = cell_px_w >= (22 if is_bubbles else 40) and cell_px_h >= 8
+        show_numbers = cell_px_w >= (20 if is_bubbles else 30) and cell_px_h >= 7
         if not show_numbers:
             return
 

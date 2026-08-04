@@ -1348,8 +1348,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         (xmin, xmax), _ = self.price.getViewBox().viewRange()
         vis = float(xmax - xmin) / self._data.bar_seconds    # cate lumanari sunt vizibile
-        fp_show = bool(is_fp and vis <= 130)                  # footprint doar zoom-in; altfel lumanari
-        markers = bool(vis <= 80)                             # Big Trades + Absorption + Exhaustion la zoom mediu+
+        fp_show = bool(is_fp and vis <= 220)                  # footprint pana la zoom mediu (heatmap compact); apoi lumanari
+        markers = bool(vis <= 110)                            # Big Trades + Absorption + Exhaustion la zoom mediu+
         self.footprint_item.setVisible(fp_show)
         self.candles.setVisible(not fp_show)
         self.big_scatter.setVisible(bool(markers and self.chk_big.isChecked()))
@@ -1408,12 +1408,14 @@ class MainWindow(QtWidgets.QMainWindow):
             xs = [bt[0] for bt in d.big_trades]
             ys = [bt[1] for bt in d.big_trades]
             szs = [_bt_tier(bt[2]) for bt in d.big_trades]   # trepte discrete de marime
-            buy_c = QtGui.QColor(theme.UP); buy_c.setAlpha(190)
-            sell_c = QtGui.QColor(theme.DOWN); sell_c.setAlpha(190)
+            buy_c = QtGui.QColor(theme.UP); buy_c.setAlpha(235)
+            sell_c = QtGui.QColor(theme.DOWN); sell_c.setAlpha(235)
             buy_b, sell_b = pg.mkBrush(buy_c), pg.mkBrush(sell_c)
             brs = [buy_b if bt[3] == "B" else sell_b for bt in d.big_trades]
             info = [("big", bt[3], bt[2], bt[1], bt[0]) for bt in d.big_trades]  # tip,side,size,pret,epoca
-            self.big_scatter.setData(x=xs, y=ys, size=szs, brush=brs, data=info)
+            # Contur luminos -> bula se vede pe orice fundal (footprint), iar culoarea plina = directia
+            halo = pg.mkPen(QtGui.QColor(245, 245, 250), width=1.4)
+            self.big_scatter.setData(x=xs, y=ys, size=szs, brush=brs, data=info, pen=halo)
         else:
             self.big_scatter.setData(x=[], y=[])
         self._set_bt_zones(d.big_trades)   # zone S/R din cele mai mari tranzactii (optional)
@@ -1863,14 +1865,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_play.blockSignals(False)
 
     def _nav_render(self, d):
-        """Randare dupa o navigare manuala: re-centreaza pe lumanarea tinta."""
+        """Randare dupa o navigare manuala (bar-step / scrub / jump): PASTREAZA zoom-ul
+        utilizatorului (latimea X + Y). Panorameaza doar daca lumanarea curenta iese din
+        vedere -> nu se mai reseteaza graficul cand dai un pas cu Bar."""
         if d is None:
             return
-        self._follow = True
-        self.btn_follow.blockSignals(True)
-        self.btn_follow.setChecked(True)
-        self.btn_follow.blockSignals(False)
-        self._render(d, set_range=False, follow=True)
+        (x0, x1), (y0, y1) = self.price.getViewBox().viewRange()
+        self._render(d, set_range=False, follow=False)
+        if not len(d.t):
+            return
+        bar = d.bar_seconds
+        cur = float(d.t[-1])
+        width = x1 - x0
+        self._prog_range = True
+        if width > 0 and (cur > x1 - 2 * bar or cur < x0 + 2 * bar):
+            nx1 = cur + 8 * bar                                   # aliniaza lumanarea in dreapta,
+            self.price.setXRange(nx1 - width, nx1, padding=0)    # pastrand EXACT latimea (zoom-ul)
+        self.price.setYRange(y0, y1, padding=0)                  # Y mereu pastrat
+        self._prog_range = False
 
     def _step_bars(self, delta):
         if not self._ensure_replay():
