@@ -608,7 +608,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.card_poc = StatCard("POC")
         self.card_va = StatCard("VAH / VAL")
         self.card_vol = StatCard("Volum total")
-        self.card_delta = StatCard("Cumulative Delta")
+        self.card_delta = StatCard("CVD")
         for c in (self.card_symbol, self.card_poc, self.card_va, self.card_vol, self.card_delta):
             lay.addWidget(c)
         lay.addStretch(1)
@@ -807,7 +807,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.footprint_item.attach(self.price.getViewBox())
 
         # VWAP developing
-        self.vwap_curve = pg.PlotDataItem(pen=pg.mkPen(theme.VWAP, width=2))
+        _vwap_c = QtGui.QColor(theme.VWAP); _vwap_c.setAlpha(200)   # context: putin mai stins ca semnalele sa iasa in fata
+        self.vwap_curve = pg.PlotDataItem(pen=pg.mkPen(_vwap_c, width=1.5))
         self.price.addItem(self.vwap_curve)
 
         # Developing POC / Value Area: cum a MIGRAT valoarea in timp (trail per lumanare).
@@ -1634,10 +1635,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if not (self.chk_sess.isChecked() and self._sess_data):
             return
         abbr = {"Asia": "A", "Londra": "L", "NY": "NY"}
+        # Etichete DECALATE pe orizontala per sesiune -> nu se mai suprapun pe marginea dreapta
+        sess_xpos = {"Asia": 0.70, "Londra": 0.80, "NY": 0.90}
         for name, info in self._sess_data.items():
             col = QtGui.QColor(theme.SESS_COLORS.get(name, theme.TEXT_DIM))
             tag = abbr.get(name, name[:2])
-            for key, width, dash, lab in (("poc", 2, QtCore.Qt.SolidLine, "POC"),
+            xpos = sess_xpos.get(name, 0.86)
+            for key, width, dash, lab in (("poc", 1.5, QtCore.Qt.SolidLine, "POC"),
                                           ("vah", 1, QtCore.Qt.DashLine, "VAH"),
                                           ("val", 1, QtCore.Qt.DashLine, "VAL")):
                 v = info.get(key)
@@ -1646,7 +1650,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 ln = pg.InfiniteLine(
                     pos=v, angle=0, movable=False,
                     pen=pg.mkPen(col, width=width, style=dash),
-                    label=f"{tag} {lab}", labelOpts={"position": 0.86, "color": "#0a0a0a",
+                    label=f"{tag} {lab}", labelOpts={"position": xpos, "color": "#0a0a0a",
                                                      "fill": col, "movable": False})
                 ln.setZValue(-4); self.price.addItem(ln); self._sess_lines.append(ln)
             for v in info.get("lvn", []):
