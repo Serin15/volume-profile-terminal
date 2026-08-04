@@ -218,6 +218,7 @@ class FootprintItem(pg.GraphicsObject):
         self._imb_ratio = 3.0     # prag imbalance (dominanta) - reglabil din UI
         self._imb_minvol = 12     # volum minim celula pt imbalance - reglabil din UI
         self._mode = "bidask"     # "bidask" (bare bid/ask) | "volume" | "delta"
+        self._shape = "cells"     # "cells" (casute patrate) | "bubbles" (pastile rotunjite, stil DeepChart)
         self._max_side = 1.0      # max volum pe o singura latura (normalizare bare/delta)
         # Pen-uri + brush-uri PRE-CALCULATE (nu alocam nimic per celula in paint)
         self._no_pen = pg.mkPen(None)
@@ -248,6 +249,11 @@ class FootprintItem(pg.GraphicsObject):
 
     def set_mode(self, mode):
         self._mode = mode
+        self.update()
+
+    def set_shape(self, shape):
+        """'cells' = casute patrate (clasic) | 'bubbles' = pastile rotunjite (stil DeepChart)."""
+        self._shape = shape
         self.update()
 
     def attach(self, viewbox):
@@ -310,6 +316,7 @@ class FootprintItem(pg.GraphicsObject):
         ylo, yhi = ymin - h, ymax + h
         RATIO, MIN_VOL = self._imb_ratio, self._imb_minvol
         mode = self._mode
+        is_bubbles = self._shape == "bubbles"
         # Marimea celulei pe ecran (px), o singura data -> decide bare / imbalance / numere
         try:
             xscale, yscale = self._vb.viewPixelSize()
@@ -341,6 +348,26 @@ class FootprintItem(pg.GraphicsObject):
                 if not pen_is_no:
                     p.setPen(no_pen); pen_is_no = True
                 rect = QtCore.QRectF(t - w / 2, price - h / 2, w, h)
+                if is_bubbles:
+                    # Stil "bule" (DeepChart): pastila rotunjita, culoarea dominantei
+                    # (buy verde / sell mov), intensitate dupa volumul total la nivel.
+                    xr, yr = w * 0.42, h * 0.45
+                    bucket = int(min(1.0, total * inv) * nb)
+                    p.setBrush((buy_brushes if buy >= sell else sell_brushes)[bucket])
+                    p.drawRoundedRect(rect, xr, yr)
+                    if draw_imb:
+                        sell_below = cells.get(round(price - rs, 4), (0.0, 0.0))[1]
+                        buy_above = cells.get(round(price + rs, 4), (0.0, 0.0))[0]
+                        if buy >= MIN_VOL and buy >= RATIO * sell_below:
+                            p.setPen(self._buy_imb_pen); p.setBrush(no_brush)
+                            p.drawRoundedRect(rect, xr, yr); pen_is_no = False
+                        elif sell >= MIN_VOL and sell >= RATIO * buy_above:
+                            p.setPen(self._sell_imb_pen); p.setBrush(no_brush)
+                            p.drawRoundedRect(rect, xr, yr); pen_is_no = False
+                    if self._poc_of.get(t) == price:   # POC per lumanare (contur magenta)
+                        p.setPen(self._poc_pen); p.setBrush(no_brush)
+                        p.drawRoundedRect(rect, xr, yr); pen_is_no = False
+                    continue
                 if show_bars:
                     # Bare interne bid/ask (stil Quantower): fundal faint + bara sell (stanga)
                     # / buy (dreapta) din centru, lungime proportionala cu volumul laturii.
@@ -376,7 +403,7 @@ class FootprintItem(pg.GraphicsObject):
         # Numerele + delta/lumanare - doar cand celula e destul de mare pe ecran (zoom)
         if xscale <= 0 or yscale <= 0:
             return
-        show_numbers = cell_px_w >= 40 and cell_px_h >= 8
+        show_numbers = cell_px_w >= (22 if is_bubbles else 40) and cell_px_h >= 8
         if not show_numbers:
             return
 
@@ -404,7 +431,8 @@ class FootprintItem(pg.GraphicsObject):
                 dev = tr.map(QtCore.QPointF(t, price))
                 rect = QtCore.QRectF(dev.x() - cell_px_w / 2, dev.y() - cell_px_h / 2,
                                      cell_px_w, cell_px_h)
-                p.drawText(rect, QtCore.Qt.AlignCenter, f"{int(sell)}x{int(buy)}")
+                txt = f"{int(buy + sell)}" if is_bubbles else f"{int(sell)}x{int(buy)}"
+                p.drawText(rect, QtCore.Qt.AlignCenter, txt)
 
         p.restore()
 

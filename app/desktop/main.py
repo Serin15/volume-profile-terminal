@@ -526,15 +526,20 @@ class MainWindow(QtWidgets.QMainWindow):
             self._fp_mode.addItems(["Bid x Ask (bare)", "Volume", "Delta"])
             self._fp_mode.setCurrentIndex({"bidask": 0, "volume": 1, "delta": 2}
                                           .get(self.footprint_item._mode, 0))
+            self._fp_shape = QtWidgets.QComboBox()
+            self._fp_shape.addItems(["Căsuțe", "Bule (stil DeepChart)"])
+            self._fp_shape.setCurrentIndex(1 if self.footprint_item._shape == "bubbles" else 0)
+            form.addRow("Stil", self._fp_shape)
             form.addRow("Mod", self._fp_mode)
             form.addRow("Imbalance ratio (x)", self._fp_ratio)
             form.addRow("Volum minim celula", self._fp_minvol)
-            hint = QtWidgets.QLabel("Bid×Ask: bare bid/ask + imbalance. Volume: intensitate dupa volum. "
-                                    "Delta: verde/mov dupa buy−sell.")
+            hint = QtWidgets.QLabel("Stil: Căsuțe (sell×buy) sau Bule (o pastilă/nivel, volumul total, "
+                                    "verde buy / mov sell). Bid×Ask/Volume/Delta = cum se coloreaza.")
             hint.setObjectName("FieldLabel"); hint.setWordWrap(True); form.addRow(hint)
             for w in (self._fp_ratio, self._fp_minvol):
                 w.valueChanged.connect(self._on_fp_changed)
             self._fp_mode.currentIndexChanged.connect(self._on_fp_mode_changed)
+            self._fp_shape.currentIndexChanged.connect(self._on_fp_shape_changed)
             self._fp_dialog = dlg
         self._fp_dialog.show(); self._fp_dialog.raise_()
 
@@ -545,6 +550,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_fp_mode_changed(self, idx):
         self.footprint_item.set_mode(["bidask", "volume", "delta"][idx])
+
+    def _on_fp_shape_changed(self, idx):
+        self.footprint_item.set_shape("bubbles" if idx == 1 else "cells")
 
     def _build_stats(self):
         wrap = QtWidgets.QWidget()
