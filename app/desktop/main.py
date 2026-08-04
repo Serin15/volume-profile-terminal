@@ -876,6 +876,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.exh_scatter.sigHovered.connect(self._on_marker_hover)
         self.price.addItem(self.exh_scatter)
 
+        # FIX: pyqtgraph 0.14 nu mai activeaza acceptHoverEvents din hoverable=True ->
+        # sigHovered nu se declansa (tooltip-ul nu aparea). Il setam explicit (persista peste setData).
+        for _sc in (self.big_scatter, self.abs_scatter, self.exh_scatter):
+            _sc.setAcceptHoverEvents(True)
+
         # Card de tooltip la hover peste bule/markere (ascuns implicit)
         self.hover_card = pg.TextItem(color=theme.TEXT, anchor=(0, 1),
                                       fill=pg.mkBrush(20, 22, 30, 235),
