@@ -1109,8 +1109,22 @@ class MainWindow(QtWidgets.QMainWindow):
             title = "Bullish Absorption" if akind == "bull" else "Bearish Absorption"
             txt = (f"  {title}\n  Sell {sellv:.0f}    Buy {buyv:.0f}\n"
                    f"  Delta {buyv - sellv:+.0f}   pret {price:.2f}  ")
-        self.hover_card.setText(txt)
-        self.hover_card.setPos(points[0].pos().x(), points[0].pos().y())
+        # Pozitionam langa CURSOR, cu ANCORA aleasa ca sa NU iasa din ecran:
+        # cursor sus -> cardul atarna in jos; cursor la dreapta -> se extinde la stanga.
+        at_cursor = ev is not None and hasattr(ev, "x") and hasattr(ev, "y")
+        if at_cursor:
+            (vx0, vx1), (vy0, vy1) = self.price.getViewBox().viewRange()
+            ax = 1.0 if ev.x() > vx0 + 0.75 * (vx1 - vx0) else 0.0
+            ay = 0.0 if ev.y() > vy0 + 0.60 * (vy1 - vy0) else 1.0
+            try:
+                self.hover_card.setAnchor((ax, ay))
+            except Exception:
+                self.hover_card.anchor = pg.Point(ax, ay)
+        self.hover_card.setText(txt)     # setText aplica ancora (updateTextPos)
+        if at_cursor:
+            self.hover_card.setPos(float(ev.x()), float(ev.y()))
+        else:
+            self.hover_card.setPos(points[0].pos().x(), points[0].pos().y())
         self.hover_card.setVisible(True)
 
     def _snap_point(self, x, y):
@@ -1204,8 +1218,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 d = (dx * dx + dy * dy) ** 0.5
                 if d < best_d:
                     best_d, best = d, (sc, p)
-        if best is not None and best_d <= 13.0:      # in ~13 px de un marker -> arata cardul
-            self._on_marker_hover(best[0], [best[1]], None)
+        if best is not None and best_d <= 16.0:      # in ~16 px de un marker -> arata cardul
+            self._on_marker_hover(best[0], [best[1]], pt)
         else:
             self.hover_card.setVisible(False)
 
