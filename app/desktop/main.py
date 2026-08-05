@@ -1206,19 +1206,26 @@ class MainWindow(QtWidgets.QMainWindow):
         if xs <= 0 or ys <= 0:
             self.hover_card.setVisible(False)
             return
-        best = None
-        best_d = 1e18
-        for sc in (self.abs_scatter, self.exh_scatter, self.big_scatter):
-            if not sc.isVisible():
-                continue
-            for p in sc.points():
-                pos = p.pos()
-                dx = (pt.x() - pos.x()) / xs
-                dy = (pt.y() - pos.y()) / ys
-                d = (dx * dx + dy * dy) ** 0.5
-                if d < best_d:
-                    best_d, best = d, (sc, p)
-        if best is not None and best_d <= 16.0:      # in ~16 px de un marker -> arata cardul
+        def closest(scatters):
+            best, bd = None, 1e18
+            for sc in scatters:
+                if not sc.isVisible():
+                    continue
+                for p in sc.points():
+                    pos = p.pos()
+                    dx = (pt.x() - pos.x()) / xs
+                    dy = (pt.y() - pos.y()) / ys
+                    dd = (dx * dx + dy * dy) ** 0.5
+                    if dd < bd:
+                        bd, best = dd, (sc, p)
+            return best, bd
+
+        # PRIORITATE: Absorption/Exhaustion (semnale specifice) inaintea Big Trades
+        # (bulele dense/mari furau selectia cand hover-uiai putin pe langa triunghi).
+        best, bd = closest((self.abs_scatter, self.exh_scatter))
+        if best is None or bd > 16.0:
+            best, bd = closest((self.big_scatter,))
+        if best is not None and bd <= 16.0:          # in ~16 px de un marker -> arata cardul
             self._on_marker_hover(best[0], [best[1]], pt)
         else:
             self.hover_card.setVisible(False)
