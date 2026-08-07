@@ -31,6 +31,42 @@ class VolumeProfileResult:
     lvn_peaks: list          # Low Volume Nodes (metoda noua, peak detection real)
 
 
+@dataclass
+class VolumeNode:
+    """
+    Un nod STRUCTURAT din Volume Profile (HVN sau LVN), cu marginile zonei si o
+    clasa de importanta. Spre deosebire de compute_hvn_lvn_peaks() care intoarce
+    doar un pret reprezentativ, aici zona are latime -> util pentru interactiunea
+    pretului cu LVN-ul (traverseaza toata zona? o respinge la margine?).
+
+    kind:       "hvn" | "lvn"
+    price:      pretul reprezentativ (varful/valea extrema a zonei)
+    low, high:  marginile zonei (cel mai jos / cel mai sus nivel din grupul unit)
+    width:      high - low (0 = nod pe un singur nivel)
+    volume:     volumul la nivelul reprezentativ
+    prominence: cat de mult iese in evidenta fata de media profilului (>=0).
+                HVN: vol/medie - 1 ; LVN: 1 - vol/medie.
+    tier:       "major" | "minor" (dupa pragul de prominenta) - noduri importante vs marunte.
+    """
+    kind: str
+    price: float
+    low: float
+    high: float
+    width: float
+    volume: float
+    prominence: float
+    tier: str
+
+
+# Moduri de detectie LVN (unde se raporteaza vaile de volum):
+#   "full"         - pe TOT profilul (inclusiv spre margini). IMPLICIT pentru sistemul nou:
+#                    ipoteza de testat = un LVN e o zona structurala de volum mic ORIUNDE,
+#                    NU automat discount/premium.
+#   "between_hvns" - doar in intervalul dintre cel mai jos si cel mai sus HVN (comportament vechi).
+#   "value_area"   - doar in interiorul Value Area (VAL..VAH).
+LVN_MODES = ("full", "between_hvns", "value_area")
+
+
 class VolumeProfileEngine:
     """
     Engine de Volume Profile pe baza de tick-uri.
@@ -188,60 +224,18 @@ class VolumeProfileEngine:
         if not self.profile:
             return [], []
 
-        sorted_idx = sorted(self.profile.keys())
-        volumes = [self.profile[idx] for idx in sorted_idx]
-        n = len(volumes)
+        hvn_candidates, lvn_candidates, _ = self._node_candidates(
+            window, min_prominence_ratio, window_ratio)
 
-        if n == 0:
-            return [], []
+        def zones(candidates, pick_max):
+            out = []
+            for group in self._merge_groups(candidates, merge_gap_ticks):
+                best_idx, _ = (max if pick_max else min)(group, key=lambda c: c[1])
+                out.append(self._to_price(best_idx))
+            return sorted(out)
 
-        if window is None:
-            window = max(3, int(n * window_ratio))
-
-        mean_volume = sum(volumes) / n
-        hvn_min_volume = mean_volume * (1 + min_prominence_ratio)
-        lvn_max_volume = mean_volume * (1 - min_prominence_ratio)
-
-        hvn_candidates = []  # (tick_index, volume)
-        lvn_candidates = []
-
-        for i in range(n):
-            lo = max(0, i - window)
-            hi = min(n, i + window + 1)
-            local_window = volumes[lo:hi]
-
-            if volumes[i] == max(local_window) and volumes[i] >= hvn_min_volume:
-                hvn_candidates.append((sorted_idx[i], volumes[i]))
-            elif volumes[i] == min(local_window) and volumes[i] <= lvn_max_volume:
-                lvn_candidates.append((sorted_idx[i], volumes[i]))
-
-        def merge_into_zones(candidates, pick_max: bool):
-            """Grupeaza candidatii apropiati si alege reprezentantul extrem din fiecare grup."""
-            if not candidates:
-                return []
-            candidates = sorted(candidates, key=lambda c: c[0])
-            zones = []
-            current_group = [candidates[0]]
-
-            for idx, vol in candidates[1:]:
-                if idx - current_group[-1][0] <= merge_gap_ticks:
-                    current_group.append((idx, vol))
-                else:
-                    zones.append(current_group)
-                    current_group = [(idx, vol)]
-            zones.append(current_group)
-
-            representative_prices = []
-            for group in zones:
-                if pick_max:
-                    best_idx, _ = max(group, key=lambda c: c[1])
-                else:
-                    best_idx, _ = min(group, key=lambda c: c[1])
-                representative_prices.append(self._to_price(best_idx))
-            return representative_prices
-
-        hvn_zones = sorted(merge_into_zones(hvn_candidates, pick_max=True))
-        lvn_zones = sorted(merge_into_zones(lvn_candidates, pick_max=False))
+        hvn_zones = zones(hvn_candidates, True)
+        lvn_zones = zones(lvn_candidates, False)
 
         # LVN-urile reale sunt vai INTRE zone de volum mare, nu marginile sparse
         # ale distributiei. Le restrangem la intervalul acoperit de HVN-uri.
@@ -250,6 +244,105 @@ class VolumeProfileEngine:
             lvn_zones = [p for p in lvn_zones if lo <= p <= hi]
 
         return hvn_zones, lvn_zones
+
+    def _node_candidates(self, window, min_prominence_ratio, window_ratio):
+        """Candidatii HVN/LVN (varfuri/vai locale peste/sub pragul de prominenta) +
+        media profilului. Logica PARTAJATA de compute_hvn_lvn_peaks si compute_nodes,
+        ca sa existe o singura definitie a ce e un varf/vale (fara divergenta)."""
+        sorted_idx = sorted(self.profile.keys())
+        volumes = [self.profile[idx] for idx in sorted_idx]
+        n = len(volumes)
+        if n == 0:
+            return [], [], 0.0
+        if window is None:
+            window = max(3, int(n * window_ratio))
+        mean_volume = sum(volumes) / n
+        hvn_min_volume = mean_volume * (1 + min_prominence_ratio)
+        lvn_max_volume = mean_volume * (1 - min_prominence_ratio)
+        hvn_candidates, lvn_candidates = [], []
+        for i in range(n):
+            lo = max(0, i - window)
+            hi = min(n, i + window + 1)
+            local_window = volumes[lo:hi]
+            if volumes[i] == max(local_window) and volumes[i] >= hvn_min_volume:
+                hvn_candidates.append((sorted_idx[i], volumes[i]))
+            elif volumes[i] == min(local_window) and volumes[i] <= lvn_max_volume:
+                lvn_candidates.append((sorted_idx[i], volumes[i]))
+        return hvn_candidates, lvn_candidates, mean_volume
+
+    @staticmethod
+    def _merge_groups(candidates, merge_gap_ticks):
+        """Grupeaza candidatii aflati la <= merge_gap_ticks unul de altul intr-o singura
+        zona. Returneaza lista de grupuri, fiecare = lista de (tick_index, volum)."""
+        if not candidates:
+            return []
+        candidates = sorted(candidates, key=lambda c: c[0])
+        groups = []
+        current = [candidates[0]]
+        for idx, vol in candidates[1:]:
+            if idx - current[-1][0] <= merge_gap_ticks:
+                current.append((idx, vol))
+            else:
+                groups.append(current)
+                current = [(idx, vol)]
+        groups.append(current)
+        return groups
+
+    def compute_nodes(self, window: int = None, min_prominence_ratio: float = 0.15,
+                      window_ratio: float = 0.03, merge_gap_ticks: int = 4,
+                      lvn_mode: str = "full", va_percent: float = 0.70,
+                      major_prominence_ratio: float = 0.6):
+        """
+        Detectie STRUCTURATA de noduri: intoarce (hvn_nodes, lvn_nodes) ca liste de
+        VolumeNode cu margini (low/high), latime, prominenta si clasa (major/minor).
+        Foloseste ACEIASI candidati + merge ca compute_hvn_lvn_peaks (o singura sursa
+        de adevar), dar raporteaza zona intreaga, nu doar pretul reprezentativ.
+
+        lvn_mode (unde se raporteaza vaile de volum):
+            "full"         - tot profilul (IMPLICIT; ipoteza de testat, vezi LVN_MODES),
+            "between_hvns" - doar intre cel mai jos si cel mai sus HVN (comportamentul vechi),
+            "value_area"   - doar in interiorul Value Area (VAL..VAH).
+            Un mod necunoscut e tratat permisiv ca "full".
+        major_prominence_ratio: prag de prominenta peste care un nod e "major" (altfel "minor").
+        """
+        if not self.profile:
+            return [], []
+        hvn_candidates, lvn_candidates, mean_volume = self._node_candidates(
+            window, min_prominence_ratio, window_ratio)
+
+        def build(candidates, kind, pick_max):
+            nodes = []
+            for group in self._merge_groups(candidates, merge_gap_ticks):
+                best_idx, best_vol = (max if pick_max else min)(group, key=lambda c: c[1])
+                low = self._to_price(min(c[0] for c in group))
+                high = self._to_price(max(c[0] for c in group))
+                price = self._to_price(best_idx)
+                if mean_volume > 0:
+                    prom = (best_vol / mean_volume - 1.0) if pick_max \
+                        else (1.0 - best_vol / mean_volume)
+                else:
+                    prom = 0.0
+                prom = max(0.0, prom)
+                tier = "major" if prom >= major_prominence_ratio else "minor"
+                nodes.append(VolumeNode(kind=kind, price=price, low=low, high=high,
+                                        width=round(high - low, 8), volume=best_vol,
+                                        prominence=prom, tier=tier))
+            nodes.sort(key=lambda z: z.price)
+            return nodes
+
+        hvn_nodes = build(hvn_candidates, "hvn", True)
+        lvn_nodes = build(lvn_candidates, "lvn", False)
+
+        if lvn_mode == "between_hvns" and hvn_nodes:
+            lo, hi = hvn_nodes[0].price, hvn_nodes[-1].price
+            lvn_nodes = [z for z in lvn_nodes if lo <= z.price <= hi]
+        elif lvn_mode == "value_area":
+            vah, val = self.compute_value_area(va_percent)
+            if val is not None and vah is not None:
+                lvn_nodes = [z for z in lvn_nodes if val <= z.price <= vah]
+        # "full" (sau mod necunoscut) -> fara restrictie
+
+        return hvn_nodes, lvn_nodes
 
     def result(self, va_percent: float = 0.70) -> VolumeProfileResult:
         """Returneaza rezultatul complet, structurat, gata de trimis catre orice UI."""
