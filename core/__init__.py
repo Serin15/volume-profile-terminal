@@ -14,7 +14,10 @@ from core.context_engine import (ContextEngine, ContextResult, Snapshot,
                                  CvdDivergenceContext, analyze_cvd_divergence,
                                  CVD_DIVERGENCE_STATES, CVD_DIVERGENCE_DEFAULTS,
                                  PocMigrationContext, analyze_poc_migration,
-                                 POC_MIGRATION_STATES, POC_MIGRATION_DEFAULTS)
+                                 POC_MIGRATION_STATES, POC_MIGRATION_DEFAULTS,
+                                 InteractionContext, analyze_level_interaction,
+                                 analyze_lvn_interaction, analyze_acceptance_rejection,
+                                 INTERACTION_STATES, LEVEL_INTERACTION_DEFAULTS)
 
 __all__ = [
     "VolumeProfileEngine",
@@ -51,4 +54,10 @@ __all__ = [
     "analyze_poc_migration",
     "POC_MIGRATION_STATES",
     "POC_MIGRATION_DEFAULTS",
+    "InteractionContext",
+    "analyze_level_interaction",
+    "analyze_lvn_interaction",
+    "analyze_acceptance_rejection",
+    "INTERACTION_STATES",
+    "LEVEL_INTERACTION_DEFAULTS",
 ]

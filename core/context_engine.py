@@ -840,6 +840,241 @@ def analyze_poc_migration(snapshot: Snapshot, cfg=None) -> PocMigrationContext:
         poc_current=float(seg[-1]), poc_reference=float(seg[0]), adaptive_scale=adaptive_scale)
 
 
+# ================================================================== P1b — LEVEL INTERACTION (LVN + Acceptance/Rejection)
+# Ce face pretul cand interactioneaza cu o ZONA (LVN/HVN) sau un NIVEL (POC/VAH/VAL).
+# Foloseste zona reala a nodului (VolumeNode din P1a: low/high/tier), NU un singur pret.
+# Praguri ADAPTIVE la range-ul recent + latimea zonei. Cauzal (doar Snapshot, <= T),
+# cu confirmation window (FORMING -> CONFIRMED). Observatii de market behavior, NU semnale.
+LEVEL_INTERACTION_DEFAULTS = {
+    "scan_lookback": 20,         # cate bare inapoi caut episodul de interactiune
+    "tol_ticks": 1.0,            # toleranta la marginile zonei pt "atingere" (ticks)
+    "reaction_ratio": 0.6,       # miscare de respingere >= reaction_ratio * range recent (ticks)
+    "accept_ratio": 1.5,         # bare in zona >= accept_ratio * timp_asteptat_traversare -> ACCEPTANCE
+    "fast_ratio": 0.6,           # bare in zona <= fast_ratio * timp_asteptat -> FAST_TRAVERSAL
+    "confirmation_window": 3,
+    "min_bars": 5,
+    "lvn_min_prominence": 0.4,   # prag prominenta pt nodurile LVN (ca in data_service)
+    # latimea benzii pt niveluri PUNCTUALE (POC/VAH/VAL), specifica nivelului (× range recent):
+    "point_band_ratio": {"poc": 0.5, "vah": 0.3, "val": 0.3, "default": 0.35},
+}
+
+INTERACTION_STATES = (
+    "TEST", "REJECTION", "ACCEPTANCE", "FAST_TRAVERSAL", "FAILED_REJECTION", "INSUFFICIENT_EVIDENCE",
+)
+
+
+@dataclass
+class InteractionContext:
+    detected: bool
+    node_kind: str                  # lvn | hvn | poc | vah | val | ...
+    node_tier: str                  # major | minor | "" (niveluri punctuale)
+    zone_low: float
+    zone_high: float
+    entry_price: float              # pretul la prima atingere
+    penetration_ticks: float        # cat de adanc a intrat in zona (ticks)
+    bars_inside: int
+    time_inside_sec: float
+    approach_direction: str         # FROM_ABOVE | FROM_BELOW | UNKNOWN
+    exit_direction: str             # BACK | THROUGH | INSIDE | NONE
+    delta_during: float             # delta acumulata in timpul interactiunii
+    price_progress_ticks: float     # progres net de la intrare pana la T
+    state: str                      # vezi INTERACTION_STATES
+    status: str                     # NONE | FORMING | CONFIRMED
+    confirmation_window: int
+
+
+def _touch(high, low, i, zlo, zhi, tol):
+    return high[i] >= zlo - tol and low[i] <= zhi + tol
+
+
+def _find_runs(high, low, zlo, zhi, tol, lo_scan, last):
+    """Rulele consecutive de bare care ating zona, in [lo_scan .. last]."""
+    runs, i = [], lo_scan
+    while i <= last:
+        if _touch(high, low, i, zlo, zhi, tol):
+            j = i
+            while j + 1 <= last and _touch(high, low, j + 1, zlo, zhi, tol):
+                j += 1
+            runs.append((i, j)); i = j + 1
+        else:
+            i += 1
+    return runs
+
+
+def analyze_level_interaction(snapshot: Snapshot, zlo, zhi, kind, tier, cfg=None) -> InteractionContext:
+    """Motor GENERIC de interactiune cu o zona/nivel [zlo, zhi]. Pur, cauzal, adaptiv.
+    Reutilizat de LVN interaction si de acceptance/rejection pe niveluri punctuale."""
+    c = {**LEVEL_INTERACTION_DEFAULTS, **(cfg or {})}
+    n = len(snapshot)
+    R = int(c["confirmation_window"])
+
+    def none(state="INSUFFICIENT_EVIDENCE"):
+        return InteractionContext(False, kind, tier, float(zlo), float(zhi), 0.0, 0.0, 0, 0.0,
+                                  "UNKNOWN", "NONE", 0.0, 0.0, state, "NONE", R)
+
+    if n < int(c["min_bars"]) or zhi < zlo:
+        return none()
+    high, low, close, cvd, t = (snapshot.high, snapshot.low, snapshot.close,
+                                snapshot.cvd, snapshot.t)
+    tick = snapshot.tick_size or 0.25
+    last = n - 1
+    tol = c["tol_ticks"] * tick
+    lo_scan = max(0, last - int(c["scan_lookback"]))
+    runs = _find_runs(high, low, zlo, zhi, tol, lo_scan, last)
+    if not runs:
+        return none()
+
+    rs, re = runs[-1]
+    deltas = np.diff(cvd, prepend=0.0)
+    bar_range = float(np.median((high - low)[lo_scan:last + 1]))
+    bar_range_ticks = max(bar_range / tick, 1e-9)
+    zone_width_ticks = (zhi - zlo) / tick
+    expected_cross = max(1.0, zone_width_ticks / bar_range_ticks)
+    reaction_min = c["reaction_ratio"] * bar_range_ticks
+
+    approach = "UNKNOWN"
+    if rs - 1 >= 0:
+        pc = close[rs - 1]
+        approach = "FROM_ABOVE" if pc > zhi + tol else "FROM_BELOW" if pc < zlo - tol else "UNKNOWN"
+
+    entry_price = float(close[rs])
+    bars_inside = re - rs + 1
+    seg_low, seg_high = float(np.min(low[rs:re + 1])), float(np.max(high[rs:re + 1]))
+    if approach == "FROM_ABOVE":
+        penetration = (zhi - seg_low) / tick
+    elif approach == "FROM_BELOW":
+        penetration = (seg_high - zlo) / tick
+    else:
+        penetration = (seg_high - seg_low) / tick
+    delta_during = float(np.sum(deltas[rs:re + 1]))
+    cur = float(close[last])
+    price_progress = (cur - entry_price) / tick
+    post = last - re
+    still_inside = (re == last) or (zlo - tol <= cur <= zhi + tol)
+
+    if still_inside:
+        exit_dir = "INSIDE"
+    elif approach == "FROM_ABOVE":
+        exit_dir = "BACK" if cur > zhi else "THROUGH" if cur < zlo else "INSIDE"
+    elif approach == "FROM_BELOW":
+        exit_dir = "BACK" if cur < zlo else "THROUGH" if cur > zhi else "INSIDE"
+    else:
+        exit_dir = "THROUGH" if (cur > zhi or cur < zlo) else "INSIDE"
+
+    if approach == "FROM_ABOVE":
+        move_away = (cur - zhi) / tick
+    elif approach == "FROM_BELOW":
+        move_away = (zlo - cur) / tick
+    else:
+        move_away = abs(cur - (zlo + zhi) / 2.0) / tick
+
+    # respingere anterioara reala: pretul a plecat din zona (>= reaction_min) intre doua atingeri
+    prior_rejection = False
+    if len(runs) >= 2:
+        _, pre = runs[-2]
+        gap = high[pre + 1:rs] if rs > pre + 1 else np.zeros(0)
+        gap_lo = low[pre + 1:rs] if rs > pre + 1 else np.zeros(0)
+        if len(gap):
+            away = max(float(np.max(gap - zhi)) / tick, float(np.max(zlo - gap_lo)) / tick, 0.0)
+            prior_rejection = away >= reaction_min
+
+    # clasificare (transparenta, adaptiva)
+    if still_inside:
+        if bars_inside >= c["accept_ratio"] * expected_cross:
+            state, status = "ACCEPTANCE", "CONFIRMED"
+        else:
+            state, status = "TEST", "FORMING"
+    elif exit_dir == "BACK":
+        if move_away >= reaction_min:
+            state, status = "REJECTION", ("CONFIRMED" if post >= R else "FORMING")
+        else:
+            state, status = "TEST", "FORMING"
+    elif exit_dir == "THROUGH":
+        if bars_inside <= c["fast_ratio"] * expected_cross:
+            state, status = "FAST_TRAVERSAL", ("CONFIRMED" if post >= R else "FORMING")
+        else:
+            state, status = "ACCEPTANCE", "CONFIRMED"
+    else:
+        state, status = "TEST", "FORMING"
+
+    if prior_rejection and state == "ACCEPTANCE":     # respingere initiala invalidata de acceptare
+        state = "FAILED_REJECTION"
+
+    return InteractionContext(
+        True, kind, tier, float(zlo), float(zhi), entry_price, penetration, bars_inside,
+        bars_inside * snapshot.bar_seconds, approach, exit_dir, delta_during,
+        price_progress, state, status, R)
+
+
+def _lvn_nodes_from_snapshot(snapshot, min_prominence):
+    """Nodurile LVN calculate CAUZAL din footprint-ul <= T (P1a compute_nodes, full profile)."""
+    if not snapshot.footprint:
+        return []
+    vp = VolumeProfileEngine(tick_size=snapshot.row_size or 0.25)
+    for cells in snapshot.footprint.values():
+        for price, (buy, sell) in cells.items():
+            tot = buy + sell
+            if tot > 0:
+                vp.add_tick(price, tot)
+    _, lvn_nodes = vp.compute_nodes(min_prominence_ratio=min_prominence, lvn_mode="full")
+    return lvn_nodes
+
+
+def analyze_lvn_interaction(snapshot: Snapshot, cfg=None) -> InteractionContext:
+    """Interactiunea pretului cu LVN-ul cel mai RECENT atins (zona reala a nodului)."""
+    c = {**LEVEL_INTERACTION_DEFAULTS, **(cfg or {})}
+    nodes = _lvn_nodes_from_snapshot(snapshot, c["lvn_min_prominence"])
+    n = len(snapshot)
+    if not nodes or n < int(c["min_bars"]):
+        return InteractionContext(False, "lvn", "", 0.0, 0.0, 0.0, 0.0, 0, 0.0, "UNKNOWN",
+                                  "NONE", 0.0, 0.0, "INSUFFICIENT_EVIDENCE", "NONE",
+                                  int(c["confirmation_window"]))
+    high, low = snapshot.high, snapshot.low
+    tick = snapshot.tick_size or 0.25
+    tol = c["tol_ticks"] * tick
+    last = n - 1
+    lo_scan = max(0, last - int(c["scan_lookback"]))
+    best, best_touch = None, -1
+    for node in nodes:
+        for i in range(last, lo_scan - 1, -1):        # ultima atingere a zonei nodului
+            if _touch(high, low, i, node.low, node.high, tol):
+                if i > best_touch:
+                    best_touch, best = i, node
+                break
+    if best is None:
+        return InteractionContext(False, "lvn", "", 0.0, 0.0, 0.0, 0.0, 0, 0.0, "UNKNOWN",
+                                  "NONE", 0.0, 0.0, "INSUFFICIENT_EVIDENCE", "NONE",
+                                  int(c["confirmation_window"]))
+    return analyze_level_interaction(snapshot, best.low, best.high, "lvn", best.tier, cfg)
+
+
+def analyze_acceptance_rejection(snapshot: Snapshot, cfg=None) -> InteractionContext:
+    """Acelasi motor generic aplicat NIVELULUI cheie (POC/VAH/VAL) cel mai apropiat de pret.
+    Banda e specifica nivelului (POC mai lata = magnet; VAH/VAL mai ingusta)."""
+    c = {**LEVEL_INTERACTION_DEFAULTS, **(cfg or {})}
+    n = len(snapshot)
+    if n < int(c["min_bars"]):
+        return InteractionContext(False, "level", "", 0.0, 0.0, 0.0, 0.0, 0, 0.0, "UNKNOWN",
+                                  "NONE", 0.0, 0.0, "INSUFFICIENT_EVIDENCE", "NONE",
+                                  int(c["confirmation_window"]))
+    cur = float(snapshot.close[-1])
+    tick = snapshot.tick_size or 0.25
+    last = n - 1
+    lo_scan = max(0, last - int(c["scan_lookback"]))
+    bar_range = float(np.median((snapshot.high - snapshot.low)[lo_scan:last + 1]))
+    candidates = [("poc", snapshot.poc), ("vah", snapshot.vah), ("val", snapshot.val)]
+    candidates = [(k, v) for k, v in candidates if v and v > 0]
+    if not candidates:
+        return InteractionContext(False, "level", "", 0.0, 0.0, 0.0, 0.0, 0, 0.0, "UNKNOWN",
+                                  "NONE", 0.0, 0.0, "INSUFFICIENT_EVIDENCE", "NONE",
+                                  int(c["confirmation_window"]))
+    kind, level = min(candidates, key=lambda kv: abs(kv[1] - cur))
+    ratios = c["point_band_ratio"]
+    band = ratios.get(kind, ratios["default"]) * bar_range
+    band = max(band, c["tol_ticks"] * tick)
+    return analyze_level_interaction(snapshot, level - band, level + band, kind, "", cfg)
+
+
 # ------------------------------------------------------------------ ContextEngine
 class ContextEngine:
     """
@@ -869,6 +1104,8 @@ class ContextEngine:
             "exhaustion": analyze_exhaustion(snapshot, self.config.get("exhaustion")),
             "cvd_divergence": analyze_cvd_divergence(snapshot, self.config.get("cvd_divergence")),
             "poc_migration": analyze_poc_migration(snapshot, self.config.get("poc_migration")),
+            "lvn_interaction": analyze_lvn_interaction(snapshot, self.config.get("level_interaction")),
+            "acceptance_rejection": analyze_acceptance_rejection(snapshot, self.config.get("level_interaction")),
         }
         if n == 0:
             return ContextResult(now_epoch=int(snapshot.now_epoch), n_bars=0,
