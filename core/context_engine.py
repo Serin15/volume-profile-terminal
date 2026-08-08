@@ -58,6 +58,8 @@ class Snapshot:
     # Seria DEVELOPING POC (cumulativ pana la fiecare bara, cauzala) [0..k]. poc_series[-1]==poc.
     # Folosita de P4.5 (POC migration). NU e POC-ul zilei intregi.
     poc_series: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    # Trade-uri (print-uri) pe secunda per bara [0..k] (cauzal). Folosit de P5 (Tape Speed).
+    tps: np.ndarray = field(default_factory=lambda: np.zeros(0))
 
     def __len__(self):
         return len(self.t)
@@ -123,6 +125,9 @@ def snapshot_from_daydata(day, upto_index=None, va_percent=0.70) -> Snapshot:
     dp_arr = np.asarray(getattr(day, "dev_poc", []))
     poc_series = (np.array(dp_arr[:k + 1], dtype=float) if len(dp_arr) > k
                   else np.full(k + 1, float(poc)))
+    # Trades/sec per bara, feliat cauzal [0..k] (gol daca ziua nu are tps).
+    tps_arr = np.asarray(getattr(day, "tps", []))
+    tps_series = np.array(tps_arr[:k + 1], dtype=float) if len(tps_arr) > k else np.zeros(0)
 
     def col(name):
         return np.array(np.asarray(getattr(day, name))[sl], dtype=float)
@@ -135,7 +140,7 @@ def snapshot_from_daydata(day, upto_index=None, va_percent=0.70) -> Snapshot:
         footprint=footprint, row_size=float(day.row_size),
         symbol=getattr(day, "symbol", ""),
         tick_size=float(getattr(day, "tick_size", 0.25)),
-        poc_series=poc_series,
+        poc_series=poc_series, tps=tps_series,
     )
 
 
@@ -1075,6 +1080,76 @@ def analyze_acceptance_rejection(snapshot: Snapshot, cfg=None) -> InteractionCon
     return analyze_level_interaction(snapshot, level - band, level + band, kind, "", cfg)
 
 
+# ================================================================== P5 — TAPE SPEED
+# Ritmul executiei din schema Trades (Databento): trades/sec, contracts/sec, delta/sec +
+# accelerare/decelerare. ACTIVITATEA (viteza) e SEPARATA de DIRECTIE (delta) - nu le combinam
+# intr-un verdict. Praguri adaptive la activitatea recenta. Cauzal. NU semnal.
+# Nota date: schema Trades da print-uri + size; deci trades/sec (churn) si contracts/sec
+# (throughput) sunt fiabile SI DIFERITE. NU exista "orders/sec" (n-avem order book / MBO).
+TAPE_SPEED_DEFAULTS = {
+    "scale_lookback": 20,        # bare pt scala adaptiva a vitezei
+    "high_ratio": 1.4,           # contracts/sec >= high_ratio * scala -> HIGH
+    "low_ratio": 0.6,            # contracts/sec <= low_ratio  * scala -> LOW
+    "accel_window": 3,           # bare pt media recenta (accelerare)
+    "accel_tol": 0.2,            # toleranta accelerare/decelerare
+    "min_bars": 5,
+}
+
+TAPE_SPEED_STATES = ("HIGH", "NORMAL", "LOW", "INSUFFICIENT_EVIDENCE")
+
+
+@dataclass
+class TapeSpeedContext:
+    trades_per_sec: float        # print-uri/secunda (churn). 0 daca ziua n-are tps.
+    contracts_per_sec: float     # volum/secunda (throughput) - metrica principala de viteza
+    delta_per_sec: float         # delta/secunda (DIRECTIE - expusa separat, nu intra in nivel)
+    speed_level: str             # HIGH | NORMAL | LOW | INSUFFICIENT_EVIDENCE
+    acceleration: str            # ACCELERATING | DECELERATING | STEADY
+    speed_scale: float           # scala adaptiva (mediana contracts/sec recent)
+    state: str                   # = speed_level (comoditate)
+
+
+def analyze_tape_speed(snapshot: Snapshot, cfg=None) -> TapeSpeedContext:
+    """Componenta Tape Speed - pura, determinista, cauzala. Viteza (contracts/sec) clasificata
+    adaptiv, SEPARAT de directie (delta/sec expus dar neintrand in nivel)."""
+    c = {**TAPE_SPEED_DEFAULTS, **(cfg or {})}
+    vol = np.asarray(snapshot.volume, dtype=float)
+    cvd = np.asarray(snapshot.cvd, dtype=float)
+    tps = np.asarray(snapshot.tps, dtype=float)
+    bs = snapshot.bar_seconds
+    n = len(vol)
+
+    if n < int(c["min_bars"]) or bs <= 0:
+        return TapeSpeedContext(0.0, 0.0, 0.0, "INSUFFICIENT_EVIDENCE", "STEADY", 0.0,
+                                "INSUFFICIENT_EVIDENCE")
+
+    contracts_ps = vol / bs
+    deltas = np.diff(cvd, prepend=0.0) if len(cvd) else np.zeros(n)
+    cur = float(contracts_ps[-1])
+    trades_ps = float(tps[-1]) if len(tps) == n else 0.0
+    delta_ps = float(deltas[-1]) / bs
+
+    last = n - 1
+    ref = contracts_ps[max(0, last - int(c["scale_lookback"])):last]     # exclude bara curenta
+    scale = float(np.median(ref)) if len(ref) else cur
+    if scale <= 0:
+        scale = max(cur, 1e-9)
+
+    speed_level = ("HIGH" if cur >= c["high_ratio"] * scale
+                   else "LOW" if cur <= c["low_ratio"] * scale else "NORMAL")
+
+    aw = min(int(c["accel_window"]), n)
+    recent_avg = float(np.mean(contracts_ps[-aw:]))
+    if recent_avg > (1 + c["accel_tol"]) * scale:
+        acceleration = "ACCELERATING"
+    elif recent_avg < (1 - c["accel_tol"]) * scale:
+        acceleration = "DECELERATING"
+    else:
+        acceleration = "STEADY"
+
+    return TapeSpeedContext(trades_ps, cur, delta_ps, speed_level, acceleration, scale, speed_level)
+
+
 # ------------------------------------------------------------------ ContextEngine
 class ContextEngine:
     """
@@ -1106,6 +1181,7 @@ class ContextEngine:
             "poc_migration": analyze_poc_migration(snapshot, self.config.get("poc_migration")),
             "lvn_interaction": analyze_lvn_interaction(snapshot, self.config.get("level_interaction")),
             "acceptance_rejection": analyze_acceptance_rejection(snapshot, self.config.get("level_interaction")),
+            "tape_speed": analyze_tape_speed(snapshot, self.config.get("tape_speed")),
         }
         if n == 0:
             return ContextResult(now_epoch=int(snapshot.now_epoch), n_bars=0,

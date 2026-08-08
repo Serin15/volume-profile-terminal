@@ -17,7 +17,9 @@ from core.context_engine import (ContextEngine, ContextResult, Snapshot,
                                  POC_MIGRATION_STATES, POC_MIGRATION_DEFAULTS,
                                  InteractionContext, analyze_level_interaction,
                                  analyze_lvn_interaction, analyze_acceptance_rejection,
-                                 INTERACTION_STATES, LEVEL_INTERACTION_DEFAULTS)
+                                 INTERACTION_STATES, LEVEL_INTERACTION_DEFAULTS,
+                                 TapeSpeedContext, analyze_tape_speed,
+                                 TAPE_SPEED_STATES, TAPE_SPEED_DEFAULTS)
 
 __all__ = [
     "VolumeProfileEngine",
@@ -60,4 +62,8 @@ __all__ = [
     "analyze_acceptance_rejection",
     "INTERACTION_STATES",
     "LEVEL_INTERACTION_DEFAULTS",
+    "TapeSpeedContext",
+    "analyze_tape_speed",
+    "TAPE_SPEED_STATES",
+    "TAPE_SPEED_DEFAULTS",
 ]
