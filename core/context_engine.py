@@ -55,6 +55,9 @@ class Snapshot:
     row_size: float
     symbol: str = ""
     tick_size: float = 0.25  # tick-ul instrumentului (NQ=0.25) - pt "ticks de progres"
+    # Seria DEVELOPING POC (cumulativ pana la fiecare bara, cauzala) [0..k]. poc_series[-1]==poc.
+    # Folosita de P4.5 (POC migration). NU e POC-ul zilei intregi.
+    poc_series: np.ndarray = field(default_factory=lambda: np.zeros(0))
 
     def __len__(self):
         return len(self.t)
@@ -116,6 +119,11 @@ def snapshot_from_daydata(day, upto_index=None, va_percent=0.70) -> Snapshot:
     if poc is None or vah is None or val is None:
         poc, vah, val = _levels_from_footprint(footprint, float(day.row_size), va_percent)
 
+    # Seria developing POC cauzala [0..k]. Fallback (dev_poc absent) = constanta = degenerat sigur.
+    dp_arr = np.asarray(getattr(day, "dev_poc", []))
+    poc_series = (np.array(dp_arr[:k + 1], dtype=float) if len(dp_arr) > k
+                  else np.full(k + 1, float(poc)))
+
     def col(name):
         return np.array(np.asarray(getattr(day, name))[sl], dtype=float)
 
@@ -127,6 +135,7 @@ def snapshot_from_daydata(day, upto_index=None, va_percent=0.70) -> Snapshot:
         footprint=footprint, row_size=float(day.row_size),
         symbol=getattr(day, "symbol", ""),
         tick_size=float(getattr(day, "tick_size", 0.25)),
+        poc_series=poc_series,
     )
 
 
@@ -755,6 +764,82 @@ def analyze_cvd_divergence(snapshot: Snapshot, cfg=None) -> CvdDivergenceContext
     return result("INSUFFICIENT_EVIDENCE", "NONE", "NONE", "NONE", 0.0, None, None, slope, momentum)
 
 
+# ================================================================== P4.5 — POC MIGRATION
+# Directia + comportamentul POC-ului DEVELOPING in timp (nu doar pozitia curenta).
+# Cauzal: foloseste exclusiv seria developing POC pana la T (Snapshot.poc_series),
+# NICIODATA POC-ul zilei intregi. Praguri adaptive raportate la deplasarea recenta a POC.
+# NU e semnal: POC rising NU inseamna bullish automat - e context.
+POC_MIGRATION_DEFAULTS = {
+    "window": 10,                # bare pe care se masoara migratia
+    "scale_lookback": 30,        # bare pt scala adaptiva a deplasarii POC
+    "min_bars": 6,               # sub atat -> INSUFFICIENT_EVIDENCE
+    "dir_ratio": 0.35,           # |net| >= dir_ratio * (deplasare tipica * window) -> directional
+    "strong_consistency": 0.6,   # consistenta >= atat -> migratie STRONG (altfel WEAK)
+}
+
+POC_MIGRATION_STATES = ("POC_RISING", "POC_FALLING", "POC_SIDEWAYS", "INSUFFICIENT_EVIDENCE")
+
+
+@dataclass
+class PocMigrationContext:
+    state: str                   # vezi POC_MIGRATION_STATES
+    direction: str               # RISING | FALLING | SIDEWAYS | NONE
+    migration_strength: str      # STRONG | WEAK | NONE
+    net_ticks: float             # deplasarea neta a POC pe fereastra (cu semn, in ticks)
+    speed_ticks_per_bar: float   # viteza medie (ticks/bara)
+    consistency: float           # |net| / drum_total (0..1): 1 = monoton, ~0 = oscilant
+    window: int
+    poc_current: float
+    poc_reference: float         # POC la inceputul ferestrei
+    adaptive_scale: float        # referinta de semnificatie (deplasare tipica * window)
+
+
+def analyze_poc_migration(snapshot: Snapshot, cfg=None) -> PocMigrationContext:
+    """Componenta POC Migration - pura, determinista, cauzala. Directie + magnitudine +
+    viteza + consistenta ale POC-ului developing. Praguri adaptive la deplasarea recenta."""
+    c = {**POC_MIGRATION_DEFAULTS, **(cfg or {})}
+    poc = np.asarray(snapshot.poc_series, dtype=float)
+    tick = snapshot.tick_size or 0.25
+    n = len(poc)
+    W = int(c["window"])
+
+    def none(state):
+        cur = float(poc[-1]) if n else 0.0
+        direction = "SIDEWAYS" if state == "POC_SIDEWAYS" else "NONE"
+        return PocMigrationContext(state=state, direction=direction, migration_strength="NONE",
+                                   net_ticks=0.0, speed_ticks_per_bar=0.0, consistency=0.0,
+                                   window=W, poc_current=cur, poc_reference=cur, adaptive_scale=0.0)
+
+    if n < max(int(c["min_bars"]), 2):
+        return none("INSUFFICIENT_EVIDENCE")
+
+    w = min(W, n - 1)
+    seg = poc[-(w + 1):]
+    dpoc = np.diff(seg)
+    net = float(seg[-1] - seg[0])
+    total_path = float(np.sum(np.abs(dpoc)))
+
+    # Scala adaptiva: deplasarea per-bara TIPICA a POC recent (medie ca sa nu fie 0 cand POC e "lipicios")
+    disp = np.abs(np.diff(poc[-(int(c["scale_lookback"]) + 1):]))
+    bar_disp = float(np.mean(disp)) if len(disp) else 0.0
+    adaptive_scale = bar_disp * w
+
+    net_ticks = net / tick
+    speed = abs(net) / w / tick
+    consistency = abs(net) / total_path if total_path > 0 else 0.0
+
+    if bar_disp <= 0 or abs(net) < c["dir_ratio"] * adaptive_scale:
+        direction, strength = "SIDEWAYS", "NONE"
+    else:
+        direction = "RISING" if net > 0 else "FALLING"
+        strength = "STRONG" if consistency >= c["strong_consistency"] else "WEAK"
+
+    return PocMigrationContext(
+        state="POC_" + direction, direction=direction, migration_strength=strength,
+        net_ticks=net_ticks, speed_ticks_per_bar=speed, consistency=consistency, window=w,
+        poc_current=float(seg[-1]), poc_reference=float(seg[0]), adaptive_scale=adaptive_scale)
+
+
 # ------------------------------------------------------------------ ContextEngine
 class ContextEngine:
     """
@@ -783,6 +868,7 @@ class ContextEngine:
             "absorption": analyze_absorption(snapshot, self.config.get("absorption")),
             "exhaustion": analyze_exhaustion(snapshot, self.config.get("exhaustion")),
             "cvd_divergence": analyze_cvd_divergence(snapshot, self.config.get("cvd_divergence")),
+            "poc_migration": analyze_poc_migration(snapshot, self.config.get("poc_migration")),
         }
         if n == 0:
             return ContextResult(now_epoch=int(snapshot.now_epoch), n_bars=0,
