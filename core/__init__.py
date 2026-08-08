@@ -4,7 +4,9 @@ from core.vp_engine import VolumeProfileEngine, VolumeProfileResult, VolumeNode,
 from core.delta_engine import DeltaEngine, DeltaResult
 from core.context_engine import (ContextEngine, ContextResult, Snapshot,
                                  snapshot_from_daydata, DeltaContext, analyze_delta,
-                                 DELTA_STATES, DELTA_DEFAULTS)
+                                 DELTA_STATES, DELTA_DEFAULTS,
+                                 PriceProgressContext, analyze_price_progress,
+                                 PRICE_PROGRESS_STATES, PRICE_PROGRESS_DEFAULTS)
 
 __all__ = [
     "VolumeProfileEngine",
@@ -21,4 +23,8 @@ __all__ = [
     "analyze_delta",
     "DELTA_STATES",
     "DELTA_DEFAULTS",
+    "PriceProgressContext",
+    "analyze_price_progress",
+    "PRICE_PROGRESS_STATES",
+    "PRICE_PROGRESS_DEFAULTS",
 ]

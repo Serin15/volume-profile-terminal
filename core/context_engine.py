@@ -54,6 +54,7 @@ class Snapshot:
     footprint: dict         # DOAR barele <= T: {epoca: {pret: [buy, sell]}}
     row_size: float
     symbol: str = ""
+    tick_size: float = 0.25  # tick-ul instrumentului (NQ=0.25) - pt "ticks de progres"
 
     def __len__(self):
         return len(self.t)
@@ -92,7 +93,8 @@ def snapshot_from_daydata(day, upto_index=None, va_percent=0.70) -> Snapshot:
                         close=np.zeros(0), volume=np.zeros(0), cvd=np.zeros(0),
                         poc=0.0, vah=0.0, val=0.0, footprint={},
                         row_size=float(getattr(day, "row_size", 0.0)),
-                        symbol=getattr(day, "symbol", ""))
+                        symbol=getattr(day, "symbol", ""),
+                        tick_size=float(getattr(day, "tick_size", 0.25)))
 
     k = (n - 1) if upto_index is None else max(0, min(int(upto_index), n - 1))
     sl = slice(0, k + 1)
@@ -124,6 +126,7 @@ def snapshot_from_daydata(day, upto_index=None, va_percent=0.70) -> Snapshot:
         poc=float(poc), vah=float(vah), val=float(val),
         footprint=footprint, row_size=float(day.row_size),
         symbol=getattr(day, "symbol", ""),
+        tick_size=float(getattr(day, "tick_size", 0.25)),
     )
 
 
@@ -254,6 +257,138 @@ def analyze_delta(snapshot: Snapshot, cfg=None) -> DeltaContext:
     )
 
 
+# ================================================================== P4.2 — PRICE PROGRESS
+# Efort (agresiune delta) vs rezultat (progres de pret in ticks), pe o fereastra scurta.
+# Pragurile "mare/mic" sunt ADAPTIVE: se compara efortul/rezultatul CURENT cu scala
+# tipica din ferestrele TRECUTE (nu se suprapun cu fereastra curenta) -> nimic absolut.
+PRICE_PROGRESS_DEFAULTS = {
+    "window": 3,             # cate bare formeaza "miscarea" curenta (efort + rezultat)
+    "scale_lookback": 20,    # cate ferestre trecute intra in scala adaptiva (mediana)
+    "high_ratio": 1.3,       # >= high_ratio * scala -> MARE (HIGH)
+    "low_ratio": 0.6,        # <= low_ratio  * scala -> MIC (LOW); intre -> MEDIUM
+}
+
+# Starile (relatia efort vs rezultat). NU spun bullish/bearish - doar agresiune vs progres.
+PRICE_PROGRESS_STATES = (
+    "AGGRESSION_WITH_PROGRESS",      # efort mare -> progres mare (agresiunea "livreaza")
+    "AGGRESSION_WITHOUT_PROGRESS",   # efort mare -> progres mic (agresiune neproductiva)
+    "PROGRESS_WITHOUT_AGGRESSION",   # efort mic -> progres mare (pret se misca usor)
+    "QUIET",                         # efort mic -> progres mic
+    "NEUTRAL",                       # combinatii de mijloc (nici clar mare, nici clar mic)
+    "INSUFFICIENT_EVIDENCE",         # prea putine bare pentru o scala adaptiva
+)
+
+
+@dataclass
+class PriceProgressContext:
+    """
+    Relatia dintre AGRESIUNEA delta (efort) si PROGRESUL de pret (rezultat) pe fereastra
+    curenta - OBSERVATIE, nu semnal. "Delta negativa + pret in scadere" NU e tratata
+    automat ca 'bearish confirmation': masuram cat efort a produs cat progres.
+    """
+    window: int                     # bare folosite
+    delta_sum: float                # agresiune neta pe fereastra (cu semn)
+    aggression: float               # |delta_sum| = efort
+    price_change: float             # close[T] - close[T-window] (cu semn, puncte)
+    progress_ticks: float           # price_change / tick_size
+    efficiency: float               # |price_change| / aggression (puncte per unitate de delta)
+    aggression_level: str           # HIGH | MEDIUM | LOW (fata de scala adaptiva)
+    progress_level: str             # HIGH | MEDIUM | LOW
+    direction_alignment: str        # ALIGNED | OPPOSED | FLAT (semnul delta vs semnul pretului)
+    agg_scale: float                # scala adaptiva a efortului (mediana ferestre trecute)
+    progress_scale: float           # scala adaptiva a rezultatului
+    state: str                      # vezi PRICE_PROGRESS_STATES
+
+
+def _level(value, scale, high_ratio, low_ratio):
+    """Clasifica o marime fata de o scala adaptiva: HIGH / LOW / MEDIUM."""
+    if scale <= 0:
+        return "MEDIUM"
+    if value >= high_ratio * scale:
+        return "HIGH"
+    if value <= low_ratio * scale:
+        return "LOW"
+    return "MEDIUM"
+
+
+def analyze_price_progress(snapshot: Snapshot, cfg=None) -> PriceProgressContext:
+    """
+    Componenta Price Progress - functie PURA, DETERMINISTA, CAUZALA de Snapshot.
+    Efort = |suma delta pe fereastra|; rezultat = |variatia de pret pe fereastra|.
+    Scala adaptiva = mediana ferestrelor TRECUTE (care NU se suprapun cu cea curenta).
+    """
+    c = {**PRICE_PROGRESS_DEFAULTS, **(cfg or {})}
+    w = int(c["window"])
+    close = np.asarray(snapshot.close, dtype=float)
+    cvd = np.asarray(snapshot.cvd, dtype=float)
+    n = len(close)
+    tick = snapshot.tick_size or 0.25
+
+    deltas = np.diff(cvd, prepend=0.0) if len(cvd) else np.zeros(0)
+
+    def _insufficient():
+        return PriceProgressContext(
+            window=w, delta_sum=0.0, aggression=0.0, price_change=0.0, progress_ticks=0.0,
+            efficiency=0.0, aggression_level="MEDIUM", progress_level="MEDIUM",
+            direction_alignment="FLAT", agg_scale=0.0, progress_scale=0.0,
+            state="INSUFFICIENT_EVIDENCE")
+
+    # Avem nevoie de: o fereastra curenta [n-w .. n-1] SI cel putin o fereastra trecuta
+    # care nu se suprapune cu ea. Rezultatul foloseste close[j-w] -> j >= w; ferestrele
+    # trecute se termina la j <= n-1-w (fara suprapunere) -> e nevoie de n >= 2*w+1.
+    if w < 1 or n < 2 * w + 1:
+        return _insufficient()
+
+    # Fereastra curenta (la T)
+    delta_sum = float(np.sum(deltas[n - w:]))
+    aggression = abs(delta_sum)
+    price_change = float(close[-1] - close[n - w - 1])
+    progress = abs(price_change)
+
+    # Scala adaptiva din ferestrele TRECUTE: cele care se termina la j in [w .. n-1-w]
+    # (j >= w -> close[j-w] valid; j <= n-1-w -> nu contin nicio bara din fereastra curenta).
+    past_eff, past_res = [], []
+    for j in range(w, n - w):
+        past_eff.append(abs(float(np.sum(deltas[j - w + 1:j + 1]))))
+        past_res.append(abs(float(close[j] - close[j - w])))
+    if not past_eff:
+        return _insufficient()
+    lb = int(c["scale_lookback"])
+    agg_scale = float(np.median(past_eff[-lb:]))
+    progress_scale = float(np.median(past_res[-lb:]))
+
+    agg_level = _level(aggression, agg_scale, c["high_ratio"], c["low_ratio"])
+    prog_level = _level(progress, progress_scale, c["high_ratio"], c["low_ratio"])
+
+    if price_change == 0.0 or delta_sum == 0.0:
+        alignment = "FLAT"
+    elif (delta_sum > 0) == (price_change > 0):
+        alignment = "ALIGNED"
+    else:
+        alignment = "OPPOSED"
+
+    efficiency = (progress / aggression) if aggression > 0 else 0.0
+
+    # Stare = combinatia efort x rezultat (doar cand ambele sunt clar mari/mici)
+    if agg_level == "HIGH" and prog_level == "HIGH":
+        state = "AGGRESSION_WITH_PROGRESS"
+    elif agg_level == "HIGH" and prog_level == "LOW":
+        state = "AGGRESSION_WITHOUT_PROGRESS"
+    elif agg_level == "LOW" and prog_level == "HIGH":
+        state = "PROGRESS_WITHOUT_AGGRESSION"
+    elif agg_level == "LOW" and prog_level == "LOW":
+        state = "QUIET"
+    else:
+        state = "NEUTRAL"
+
+    return PriceProgressContext(
+        window=w, delta_sum=delta_sum, aggression=aggression, price_change=price_change,
+        progress_ticks=price_change / tick, efficiency=efficiency,
+        aggression_level=agg_level, progress_level=prog_level,
+        direction_alignment=alignment, agg_scale=agg_scale, progress_scale=progress_scale,
+        state=state)
+
+
 # ------------------------------------------------------------------ ContextEngine
 class ContextEngine:
     """
@@ -275,8 +410,11 @@ class ContextEngine:
     def analyze(self, snapshot: Snapshot) -> ContextResult:
         """Snapshot cauzal -> ContextResult. Pura, determinista, fara look-ahead."""
         n = len(snapshot)
-        # Componente de order flow (fiecare = functie pura de Snapshot). P4.1: doar Delta.
-        components = {"delta": analyze_delta(snapshot, self.config.get("delta"))}
+        # Componente de order flow (fiecare = functie pura de Snapshot).
+        components = {
+            "delta": analyze_delta(snapshot, self.config.get("delta")),
+            "price_progress": analyze_price_progress(snapshot, self.config.get("price_progress")),
+        }
         if n == 0:
             return ContextResult(now_epoch=int(snapshot.now_epoch), n_bars=0,
                                  last_price=0.0, poc=0.0, cvd=0.0, components=components)
