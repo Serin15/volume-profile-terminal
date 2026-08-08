@@ -6,7 +6,11 @@ from core.context_engine import (ContextEngine, ContextResult, Snapshot,
                                  snapshot_from_daydata, DeltaContext, analyze_delta,
                                  DELTA_STATES, DELTA_DEFAULTS,
                                  PriceProgressContext, analyze_price_progress,
-                                 PRICE_PROGRESS_STATES, PRICE_PROGRESS_DEFAULTS)
+                                 PRICE_PROGRESS_STATES, PRICE_PROGRESS_DEFAULTS,
+                                 AbsorptionContext, analyze_absorption,
+                                 ABSORPTION_STATES, ABSORPTION_DEFAULTS,
+                                 ExhaustionContext, analyze_exhaustion,
+                                 EXHAUSTION_STATES, EXHAUSTION_DEFAULTS)
 
 __all__ = [
     "VolumeProfileEngine",
@@ -27,4 +31,12 @@ __all__ = [
     "analyze_price_progress",
     "PRICE_PROGRESS_STATES",
     "PRICE_PROGRESS_DEFAULTS",
+    "AbsorptionContext",
+    "analyze_absorption",
+    "ABSORPTION_STATES",
+    "ABSORPTION_DEFAULTS",
+    "ExhaustionContext",
+    "analyze_exhaustion",
+    "EXHAUSTION_STATES",
+    "EXHAUSTION_DEFAULTS",
 ]

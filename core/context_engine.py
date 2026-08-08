@@ -389,6 +389,214 @@ def analyze_price_progress(snapshot: Snapshot, cfg=None) -> PriceProgressContext
         state=state)
 
 
+# ================================================================== P4.3 — ABSORPTION / EXHAUSTION
+# Transforma markerele in STARI contextuale cauzale, cu confirmation window
+# (FORMING -> CONFIRMED/FADED) si reactie ulterioara masurata DOAR din bare <= T.
+# Praguri adaptive (raportate la volumul si range-ul recent), nu valori fixe.
+#
+# IMPORTANT: absorption are conditii PROPRII (dominanta agresorului in zona extrema +
+# respingere in bara), NU e acelasi lucru cu "aggression without progress" din P4.2.
+
+ABSORPTION_DEFAULTS = {
+    "zone": 2,               # cate nivele de la extrema formeaza "zona"
+    "dom": 1.8,              # agresorul dominant >= dom x cealalta parte, in zona
+    "frac": 0.22,            # zona concentreaza >= frac din volumul barei
+    "reject": 0.55,          # respingere: inchidere la >= reject din range fata de extrema
+    "min_vol_ratio": 0.25,   # agresiune zona >= ratio x mediana volum recent (ADAPTIV)
+    "vol_lookback": 20,      # bare pt mediana de volum/range
+    "confirmation_window": 3,  # bare de asteptat pt confirmare (reactie)
+    "reaction_ratio": 0.5,   # reactie >= ratio x mediana range recent (ticks) -> CONFIRMED
+    "scan_lookback": 15,     # cat de departe inapoi caut cel mai RECENT candidat
+}
+
+ABSORPTION_STATES = (
+    "NONE",
+    "BULL_ABSORPTION_FORMING", "BULL_ABSORPTION_CONFIRMED", "BULL_ABSORPTION_FADED",
+    "BEAR_ABSORPTION_FORMING", "BEAR_ABSORPTION_CONFIRMED", "BEAR_ABSORPTION_FADED",
+)
+
+EXHAUSTION_DEFAULTS = {
+    "window": 14,            # fereastra pt extrema noua + mediana de volum
+    "vol_mult": 2.0,         # climax: volum >= vol_mult x mediana
+    "delta_frac": 0.20,      # delta in directia trendului >= frac din volum
+    "confirmation_window": 3,
+    "reaction_ratio": 0.5,
+    "vol_lookback": 20,
+    "scan_lookback": 15,
+}
+
+EXHAUSTION_STATES = (
+    "NONE",
+    "TOP_EXHAUSTION_FORMING", "TOP_EXHAUSTION_CONFIRMED", "TOP_EXHAUSTION_FADED",
+    "BOT_EXHAUSTION_FORMING", "BOT_EXHAUSTION_CONFIRMED", "BOT_EXHAUSTION_FADED",
+)
+
+
+@dataclass
+class AbsorptionContext:
+    detected: bool
+    kind: str                       # "bull" | "bear" | None
+    price: float                    # nivelul extrem absorbit
+    bar_epoch: int
+    bars_since: int                 # cate bare au trecut de la candidat pana la T
+    aggression: float               # volumul agresiv absorbit in zona
+    within_bar_rejection: float     # respingerea in bara (0..1)
+    status: str                     # NONE | FORMING | CONFIRMED | FADED
+    subsequent_reaction_ticks: float  # reactie cauzala (None pana la confirmare)
+    confirmation_window: int
+    state: str                      # vezi ABSORPTION_STATES
+
+
+@dataclass
+class ExhaustionContext:
+    detected: bool
+    kind: str                       # "top" | "bot" | None
+    price: float
+    bar_epoch: int
+    bars_since: int
+    climax_volume: float
+    delta: float
+    status: str                     # NONE | FORMING | CONFIRMED | FADED
+    subsequent_reaction_ticks: float
+    confirmation_window: int
+    state: str                      # vezi EXHAUSTION_STATES
+
+
+def _median_recent(values, upto_exclusive, lookback):
+    """Mediana valorilor din [upto-lookback .. upto), robust; 0.0 daca gol."""
+    lo = max(0, upto_exclusive - lookback)
+    seg = values[lo:upto_exclusive]
+    return float(np.median(seg)) if len(seg) else 0.0
+
+
+def _absorption_candidate(cells, h, l, cl, v_total, c, min_vol):
+    """Conditiile PROPRII de absorptie pe o bara inchisa. Returneaza (kind, price, aggression, rejection) sau None."""
+    rng = h - l
+    if rng <= 0 or v_total <= 0 or not cells:
+        return None
+    prices = sorted(cells.keys())
+    zn = int(c["zone"])
+    low_zone, high_zone = prices[:zn], prices[-zn:]
+    buy_lo = sum(cells[p][0] for p in low_zone); sell_lo = sum(cells[p][1] for p in low_zone)
+    buy_hi = sum(cells[p][0] for p in high_zone); sell_hi = sum(cells[p][1] for p in high_zone)
+    # Bull: vanzare agresiva la MINIM, absorbita + inchidere sus (respingere de jos)
+    if (sell_lo >= min_vol and sell_lo >= c["dom"] * buy_lo
+            and sell_lo >= c["frac"] * v_total and (cl - l) / rng >= c["reject"]):
+        return ("bull", l, sell_lo, (cl - l) / rng)
+    # Bear: cumparare agresiva la MAXIM, absorbita + inchidere jos (respingere de sus)
+    if (buy_hi >= min_vol and buy_hi >= c["dom"] * sell_hi
+            and buy_hi >= c["frac"] * v_total and (h - cl) / rng >= c["reject"]):
+        return ("bear", h, buy_hi, (h - cl) / rng)
+    return None
+
+
+def analyze_absorption(snapshot: Snapshot, cfg=None) -> AbsorptionContext:
+    """Componenta Absorption - pura, determinista, cauzala. Cel mai RECENT candidat +
+    statusul lui (FORMING pana trece confirmation_window; apoi CONFIRMED/FADED dupa reactia
+    masurata DOAR din bare <= T). Fara look-ahead: reactia se citeste doar cand a elapsat."""
+    c = {**ABSORPTION_DEFAULTS, **(cfg or {})}
+    n = len(snapshot)
+    none = AbsorptionContext(False, None, 0.0, 0, 0, 0.0, 0.0, "NONE", None,
+                             int(c["confirmation_window"]), "NONE")
+    if n < 3:
+        return none
+    high, low, close = snapshot.high, snapshot.low, snapshot.close
+    vol, fp, tick = snapshot.volume, snapshot.footprint, (snapshot.tick_size or 0.25)
+    t = snapshot.t
+    last = n - 1                                  # bara curenta (o excludem din candidati)
+    min_vol = c["min_vol_ratio"] * _median_recent(vol, last, int(c["vol_lookback"]))
+    med_range = _median_recent(high - low, last, int(c["vol_lookback"]))
+    reaction_min = c["reaction_ratio"] * (med_range / tick)
+    w = int(c["confirmation_window"])
+
+    lo_scan = max(0, last - int(c["scan_lookback"]))
+    for k in range(last - 1, lo_scan - 1, -1):    # bare INCHISE, cel mai recent intai
+        cells = fp.get(int(round(t[k])))
+        cand = _absorption_candidate(cells, float(high[k]), float(low[k]), float(close[k]),
+                                     float(vol[k]), c, min_vol)
+        if cand is None:
+            continue
+        kind, price, aggression, rejection = cand
+        bars_since = last - k
+        if bars_since < w:                        # inca nu a trecut fereastra -> PENDING
+            status, reaction = "FORMING", None
+        else:
+            seg = slice(k + 1, k + 1 + w)
+            if kind == "bull":
+                broke = float(np.min(low[seg])) < price - 1e-9
+                reaction = (float(close[k + w]) - price) / tick
+            else:
+                broke = float(np.max(high[seg])) > price + 1e-9
+                reaction = (price - float(close[k + w])) / tick
+            status = "CONFIRMED" if (not broke and reaction >= reaction_min) else "FADED"
+        state = f"{kind.upper()}_ABSORPTION_{status}"
+        return AbsorptionContext(True, kind, float(price), int(round(t[k])), bars_since,
+                                 float(aggression), float(rejection), status, reaction, w, state)
+    return none
+
+
+def _exhaustion_candidate(snapshot, k, c, med_vol):
+    """Conditiile de exhaustion (climax + extrema noua + delta in trend) pe bara k."""
+    win = int(c["window"])
+    if k < win:
+        return None
+    high, low, vol, cvd = snapshot.high, snapshot.low, snapshot.volume, snapshot.cvd
+    v = float(vol[k])
+    if v <= 0 or med_vol <= 0 or v < c["vol_mult"] * med_vol:
+        return None
+    delta = float(cvd[k] - cvd[k - 1])
+    new_high = high[k] >= float(np.max(high[k - win:k + 1])) - 1e-9
+    new_low = low[k] <= float(np.min(low[k - win:k + 1])) + 1e-9
+    if new_high and delta > 0 and delta >= c["delta_frac"] * v:
+        return ("top", float(high[k]), v, delta)
+    if new_low and delta < 0 and -delta >= c["delta_frac"] * v:
+        return ("bot", float(low[k]), v, delta)
+    return None
+
+
+def analyze_exhaustion(snapshot: Snapshot, cfg=None) -> ExhaustionContext:
+    """Componenta Exhaustion - pura, determinista, cauzala. SEPARATA de absorption: aici
+    e climax de volum/agresiune la o extrema NOUA, urmat (posibil) de deteriorarea progresului.
+    Status FORMING -> CONFIRMED/FADED dupa reactia cauzala (fara look-ahead)."""
+    c = {**EXHAUSTION_DEFAULTS, **(cfg or {})}
+    n = len(snapshot)
+    none = ExhaustionContext(False, None, 0.0, 0, 0, 0.0, 0.0, "NONE", None,
+                             int(c["confirmation_window"]), "NONE")
+    if n < int(c["window"]) + 2:
+        return none
+    high, low, close, vol, t = (snapshot.high, snapshot.low, snapshot.close,
+                                snapshot.volume, snapshot.t)
+    tick = snapshot.tick_size or 0.25
+    last = n - 1
+    med_range = _median_recent(high - low, last, int(c["vol_lookback"]))
+    reaction_min = c["reaction_ratio"] * (med_range / tick)
+    w = int(c["confirmation_window"])
+
+    lo_scan = max(int(c["window"]), last - int(c["scan_lookback"]))
+    for k in range(last - 1, lo_scan - 1, -1):
+        med_vol = _median_recent(vol, k, int(c["window"]))
+        cand = _exhaustion_candidate(snapshot, k, c, med_vol)
+        if cand is None:
+            continue
+        kind, price, climax_vol, delta = cand
+        bars_since = last - k
+        if bars_since < w:
+            status, reaction = "FORMING", None
+        else:
+            seg = slice(k + 1, k + 1 + w)
+            if kind == "top":                     # cumparatori epuizati la maxim -> asteptam reversal jos
+                broke = float(np.max(high[seg])) > price + 1e-9
+                reaction = (price - float(close[k + w])) / tick
+            else:
+                broke = float(np.min(low[seg])) < price - 1e-9
+                reaction = (float(close[k + w]) - price) / tick
+            status = "CONFIRMED" if (not broke and reaction >= reaction_min) else "FADED"
+        state = f"{kind.upper()}_EXHAUSTION_{status}"
+        return ExhaustionContext(True, kind, float(price), int(round(t[k])), bars_since,
+                                 float(climax_vol), float(delta), status, reaction, w, state)
+    return none
+
+
 # ------------------------------------------------------------------ ContextEngine
 class ContextEngine:
     """
@@ -414,6 +622,8 @@ class ContextEngine:
         components = {
             "delta": analyze_delta(snapshot, self.config.get("delta")),
             "price_progress": analyze_price_progress(snapshot, self.config.get("price_progress")),
+            "absorption": analyze_absorption(snapshot, self.config.get("absorption")),
+            "exhaustion": analyze_exhaustion(snapshot, self.config.get("exhaustion")),
         }
         if n == 0:
             return ContextResult(now_epoch=int(snapshot.now_epoch), n_bars=0,
