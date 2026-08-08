@@ -596,3 +596,63 @@ def load_day(filename, va_percent=0.70, interval="5min", row_size=2.0,
         absorption=absorption, exhaustion=exhaustion,
         dev_poc=dev_poc, dev_vah=dev_vah, dev_val=dev_val, tps=tps,
     )
+
+
+def build_reference_levels(filename, mode="session", va_percent=0.70, row_size=2.0,
+                           sessions=None):
+    """
+    Niveluri de CONTEXT din sesiuni PRECEDENTE, ca list[ReferenceLevel] (core), pentru P2.
+    Aditiv: nu modifica nimic din pipeline-ul existent, doar reuseste loaderele.
+
+    - Sesiunea precedenta COMPLETA: POC/VAH/VAL + HVN/LVN + PDH/PDL (available_from=0 = istorie).
+    - Sub-sesiunile de AZI (Asia/Londra/NY) daca `sessions` e dat (SESSION_DEFS[...]):
+      fiecare nivel primeste available_from = inchiderea sesiunii lui. Gate-ul cauzal din
+      analyze_session_context foloseste DOAR nivelurile cu available_from <= T -> Asia/Londra
+      devin context abia dupa ce se inchid (fara look-ahead).
+    """
+    from core import ReferenceLevel
+    out = []
+    date = _date_of(filename)
+    if not date:
+        return out
+    available = _available_by_date()
+    d = datetime.date(int(date[:4]), int(date[4:6]), int(date[6:8]))
+
+    prior_file = None
+    for back in range(1, 8):
+        pdate = (d - datetime.timedelta(days=back)).strftime("%Y%m%d")
+        if pdate in available:
+            prior_file = available[pdate]
+            break
+    if prior_file:
+        tk, _ = _get_ticks(prior_file, mode, available)
+        if not tk.df.empty:
+            vp = VolumeProfileEngine(tick_size=row_size)
+            vp.add_ticks_bulk(tk.price_volume())
+            vpr = vp.result(va_percent=va_percent)
+            hvn_nodes, lvn_nodes = vp.compute_nodes(min_prominence_ratio=0.4, lvn_mode="full")
+            prices = tk.df["price"]
+            for kind, val in (("poc", vpr.poc), ("vah", vpr.vah), ("val", vpr.val),
+                              ("high", float(prices.max())), ("low", float(prices.min()))):
+                if val is not None:
+                    out.append(ReferenceLevel("prev", kind, float(val), 0))
+            for nd in hvn_nodes[:5]:
+                out.append(ReferenceLevel("prev", "hvn", float(nd.price), 0))
+            for nd in lvn_nodes[:5]:
+                out.append(ReferenceLevel("prev", "lvn", float(nd.price), 0))
+
+    if sessions:
+        sp = session_profiles(filename, sessions, mode=mode, va_percent=va_percent,
+                              row_size=row_size)
+        for name, info in sp.items():
+            avail = int(round(info["end"]))
+            for kind in ("poc", "vah", "val"):
+                if info.get(kind) is not None:
+                    out.append(ReferenceLevel(name.lower(), kind, float(info[kind]), avail))
+            out.append(ReferenceLevel(name.lower(), "high", float(info["high"]), avail))
+            out.append(ReferenceLevel(name.lower(), "low", float(info["low"]), avail))
+            for p in info.get("hvn", []):
+                out.append(ReferenceLevel(name.lower(), "hvn", float(p), avail))
+            for p in info.get("lvn", []):
+                out.append(ReferenceLevel(name.lower(), "lvn", float(p), avail))
+    return out

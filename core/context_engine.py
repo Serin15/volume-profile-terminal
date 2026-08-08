@@ -53,6 +53,7 @@ class Snapshot:
     val: float
     footprint: dict         # DOAR barele <= T: {epoca: {pret: [buy, sell]}}
     row_size: float
+    reference_levels: list = field(default_factory=list)   # niveluri sesiuni precedente (P2)
     symbol: str = ""
     tick_size: float = 0.25  # tick-ul instrumentului (NQ=0.25) - pt "ticks de progres"
     # Seria DEVELOPING POC (cumulativ pana la fiecare bara, cauzala) [0..k]. poc_series[-1]==poc.
@@ -78,7 +79,7 @@ def _levels_from_footprint(footprint, row_size, va_percent=0.70):
     return (r.poc or 0.0, r.vah or 0.0, r.val or 0.0)
 
 
-def snapshot_from_daydata(day, upto_index=None, va_percent=0.70) -> Snapshot:
+def snapshot_from_daydata(day, upto_index=None, va_percent=0.70, reference_levels=None) -> Snapshot:
     """
     Construieste un Snapshot CAUZAL dintr-un DayData, pastrand DOAR barele [0..upto_index].
 
@@ -90,6 +91,8 @@ def snapshot_from_daydata(day, upto_index=None, va_percent=0.70) -> Snapshot:
     replay, adica deja taiat la bara curenta).
     `day` = orice obiect cu forma unui DayData (duck typing; nu importam clasa).
     """
+    refs = (list(reference_levels) if reference_levels is not None
+            else list(getattr(day, "reference_levels", [])))
     t_all = np.asarray(day.t)
     n = len(t_all)
     if n == 0:
@@ -98,6 +101,7 @@ def snapshot_from_daydata(day, upto_index=None, va_percent=0.70) -> Snapshot:
                         close=np.zeros(0), volume=np.zeros(0), cvd=np.zeros(0),
                         poc=0.0, vah=0.0, val=0.0, footprint={},
                         row_size=float(getattr(day, "row_size", 0.0)),
+                        reference_levels=refs,
                         symbol=getattr(day, "symbol", ""),
                         tick_size=float(getattr(day, "tick_size", 0.25)))
 
@@ -138,6 +142,7 @@ def snapshot_from_daydata(day, upto_index=None, va_percent=0.70) -> Snapshot:
         volume=col("volume"), cvd=col("cvd"),
         poc=float(poc), vah=float(vah), val=float(val),
         footprint=footprint, row_size=float(day.row_size),
+        reference_levels=refs,
         symbol=getattr(day, "symbol", ""),
         tick_size=float(getattr(day, "tick_size", 0.25)),
         poc_series=poc_series, tps=tps_series,
@@ -1150,6 +1155,108 @@ def analyze_tape_speed(snapshot: Snapshot, cfg=None) -> TapeSpeedContext:
     return TapeSpeedContext(trades_ps, cur, delta_ps, speed_level, acceleration, scale, speed_level)
 
 
+# ================================================================== P2 — PREVIOUS SESSION CONTEXT
+# Unde e pretul fata de nivelurile sesiunilor PRECEDENTE (POC/VAH/VAL/HVN/LVN) si cum
+# interactioneaza cu ele. Cauzal: fiecare nivel are `available_from` (epoca de inchidere a
+# sesiunii); componenta foloseste DOAR nivelurile cu available_from <= T. Context, NU semnal.
+SESSION_CONTEXT_DEFAULTS = {
+    "band_ratio": 0.3,       # banda pt interactiunea cu nivelul cel mai apropiat (× range recent)
+}
+
+
+@dataclass(frozen=True)
+class ReferenceLevel:
+    """Un nivel dintr-o sesiune precedenta. available_from = epoca de la care e cauzal cunoscut
+    (inchiderea sesiunii); 0 = mereu disponibil (istorie deja completa)."""
+    session: str             # "prev" | "asia" | "london" | "ny" | ...
+    kind: str                # poc | vah | val | hvn | lvn | high | low
+    price: float
+    available_from: int = 0
+
+
+@dataclass
+class LevelRef:
+    session: str
+    kind: str
+    price: float
+    distance_ticks: float    # (pret_curent - price) / tick, cu semn
+
+
+@dataclass
+class SessionProfileRef:
+    session: str
+    poc: float
+    vah: float
+    val: float
+    high: float
+    low: float
+    hvn: list
+    lvn: list
+    location: str            # ABOVE_VALUE | INSIDE_VALUE | BELOW_VALUE | UNKNOWN (pret vs VA sesiunii)
+    poc_distance_ticks: float
+
+
+@dataclass
+class SessionContextContext:
+    available: bool
+    price: float
+    profiles: list                       # list[SessionProfileRef] (doar sesiuni disponibile cauzal)
+    nearest_level: object                # LevelRef | None
+    nearest_interaction_state: str       # starea P1b pe nivelul cel mai apropiat (sau NONE)
+    nearest_interaction_status: str
+
+
+def analyze_session_context(snapshot: Snapshot, cfg=None) -> SessionContextContext:
+    """Componenta Previous Session Context - pura, cauzala. Rezuma profilele sesiunilor
+    precedente DISPONIBILE la T + pozitia pretului fata de ele + interactiunea (motor P1b)."""
+    c = {**SESSION_CONTEXT_DEFAULTS, **(cfg or {})}
+    n = len(snapshot)
+    tick = snapshot.tick_size or 0.25
+    price = float(snapshot.close[-1]) if n else 0.0
+    now = snapshot.now_epoch
+    refs = [r for r in snapshot.reference_levels if int(r.available_from) <= now]   # gate CAUZAL
+    if n == 0 or not refs:
+        return SessionContextContext(False, price, [], None, "NONE", "NONE")
+
+    by_sess = {}
+    for r in refs:
+        by_sess.setdefault(r.session, []).append(r)
+
+    profiles = []
+    for sess in sorted(by_sess):
+        d, hvn, lvn = {}, [], []
+        for r in by_sess[sess]:
+            if r.kind in ("poc", "vah", "val", "high", "low"):
+                d[r.kind] = float(r.price)
+            elif r.kind == "hvn":
+                hvn.append(float(r.price))
+            elif r.kind == "lvn":
+                lvn.append(float(r.price))
+        poc, vah, val = d.get("poc", 0.0), d.get("vah", 0.0), d.get("val", 0.0)
+        if vah > 0 and val > 0:
+            location = ("ABOVE_VALUE" if price > vah else "BELOW_VALUE" if price < val
+                        else "INSIDE_VALUE")
+        else:
+            location = "UNKNOWN"
+        poc_dist = (price - poc) / tick if poc > 0 else 0.0
+        profiles.append(SessionProfileRef(sess, poc, vah, val, d.get("high", 0.0),
+                                          d.get("low", 0.0), sorted(hvn), sorted(lvn),
+                                          location, poc_dist))
+
+    nearest = min(refs, key=lambda r: (abs(r.price - price), r.session, r.kind, r.price))
+    nearest_ref = LevelRef(nearest.session, nearest.kind, float(nearest.price),
+                           (price - nearest.price) / tick)
+
+    # Interactiunea cu nivelul cel mai apropiat, prin motorul GENERIC din P1b (banda adaptiva)
+    last = n - 1
+    lo_scan = max(0, last - 20)
+    bar_range = float(np.median((snapshot.high - snapshot.low)[lo_scan:last + 1]))
+    band = max(c["band_ratio"] * bar_range, tick)
+    inter = analyze_level_interaction(snapshot, nearest.price - band, nearest.price + band,
+                                      f"{nearest.session}_{nearest.kind}", "")
+    return SessionContextContext(True, price, profiles, nearest_ref, inter.state, inter.status)
+
+
 # ------------------------------------------------------------------ ContextEngine
 class ContextEngine:
     """
@@ -1182,6 +1289,7 @@ class ContextEngine:
             "lvn_interaction": analyze_lvn_interaction(snapshot, self.config.get("level_interaction")),
             "acceptance_rejection": analyze_acceptance_rejection(snapshot, self.config.get("level_interaction")),
             "tape_speed": analyze_tape_speed(snapshot, self.config.get("tape_speed")),
+            "session_context": analyze_session_context(snapshot, self.config.get("session_context")),
         }
         if n == 0:
             return ContextResult(now_epoch=int(snapshot.now_epoch), n_bars=0,
