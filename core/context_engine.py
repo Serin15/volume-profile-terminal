@@ -597,6 +597,164 @@ def analyze_exhaustion(snapshot: Snapshot, cfg=None) -> ExhaustionContext:
     return none
 
 
+# ================================================================== P4.4 — CVD DIVERGENCE
+# STRUCTURAL: compara evolutia pretului intre swing-uri confirmate cu evolutia CVD.
+# Swing-urile se confirma cauzal (au nevoie de `right` bare in dreapta) -> daca un swing
+# nou nu poate fi confirmat inca, statusul e FORMING (tentativ), nu CONFIRMED.
+# Praguri adaptive: gap-ul de pret vs range-ul recent, gap-ul de CVD vs imprastierea CVD.
+# NU e semnal: divergenta NU inseamna reversal garantat - e doar o OBSERVATIE de context.
+CVD_DIVERGENCE_DEFAULTS = {
+    "left": 3, "right": 3,           # bratele swing-ului (structural, nu 2 bare consecutive)
+    "scale_lookback": 30,            # bare pt scalele adaptive
+    "price_ratio": 0.5,              # gap pret >= price_ratio * mediana range recent
+    "cvd_ratio": 0.3,                # gap CVD  >= cvd_ratio  * imprastiere CVD recenta (std)
+    "slope_window": 5,               # bare pt panta CVD
+    "momentum_deadband_ratio": 0.15,  # banda moarta pt momentum FLAT (fata de imprastierea CVD)
+}
+
+CVD_DIVERGENCE_STATES = (
+    "BULLISH_DIVERGENCE", "BEARISH_DIVERGENCE", "NO_DIVERGENCE", "INSUFFICIENT_EVIDENCE",
+)
+
+
+@dataclass
+class CvdDivergenceContext:
+    cvd_value: float
+    cvd_slope: float                 # variatie CVD / bara pe slope_window
+    cvd_momentum: str                # RISING | FALLING | FLAT
+    state: str                       # vezi CVD_DIVERGENCE_STATES
+    status: str                      # CONFIRMED | FORMING | NONE
+    price_swing_direction: str       # HIGHER_HIGH | LOWER_HIGH | LOWER_LOW | HIGHER_LOW | EQUAL_* | NONE
+    cvd_swing_direction: str         # HIGHER | LOWER | EQUAL | NONE
+    strength: float                  # magnitudinea nepotrivirii (in "imprastieri CVD") - NU scor de trading
+    confirmation_window: int
+    ref1_epoch: int
+    ref1_price: float
+    ref1_cvd: float
+    ref2_epoch: int
+    ref2_price: float
+    ref2_cvd: float
+
+
+def _swings(arr, L, R, last, kind):
+    """Swing-uri CONFIRMATE (cu L bare mai jos/sus la stanga si R la dreapta). Cauzal:
+    doar cele care au deja R bare la dreapta (k+R <= last)."""
+    out = []
+    for k in range(L, last - R + 1):
+        left, right = arr[k - L:k], arr[k + 1:k + R + 1]
+        if kind == "high" and arr[k] > left.max() and arr[k] > right.max():
+            out.append(k)
+        elif kind == "low" and arr[k] < left.min() and arr[k] < right.min():
+            out.append(k)
+    return out
+
+
+def _pending_swing(arr, L, R, last, kind):
+    """Cel mai RECENT extrem local NECONFIRMAT (in ultimele R bare): are L bare la stanga
+    dominate, dar inca nu are R bare la dreapta -> potential swing (FORMING)."""
+    lo = max(L, last - R + 1)
+    for k in range(last, lo - 1, -1):
+        left, right = arr[k - L:k], arr[k + 1:last + 1]
+        if kind == "high" and arr[k] > left.max() and (len(right) == 0 or arr[k] >= right.max()):
+            return k
+        if kind == "low" and arr[k] < left.min() and (len(right) == 0 or arr[k] <= right.min()):
+            return k
+    return None
+
+
+def _eval_divergence(kind, s1, s2, price_min, cvd_min, cvd_spread):
+    """Evalueaza o pereche de swing-uri (s = (k, price, cvd, epoch)). Returneaza
+    (state|None, price_dir, cvd_dir, strength)."""
+    dp, dc = s2[1] - s1[1], s2[2] - s1[2]
+    cvd_dir = "HIGHER" if dc > cvd_min else "LOWER" if dc < -cvd_min else "EQUAL"
+    strength = abs(dc) / cvd_spread if cvd_spread > 0 else 0.0
+    if kind == "high":
+        pdir = "HIGHER_HIGH" if dp > price_min else "LOWER_HIGH" if dp < -price_min else "EQUAL_HIGH"
+        state = "BEARISH_DIVERGENCE" if (pdir == "HIGHER_HIGH" and cvd_dir == "LOWER") else None
+    else:
+        pdir = "LOWER_LOW" if dp < -price_min else "HIGHER_LOW" if dp > price_min else "EQUAL_LOW"
+        state = "BULLISH_DIVERGENCE" if (pdir == "LOWER_LOW" and cvd_dir == "HIGHER") else None
+    return state, pdir, cvd_dir, strength
+
+
+def analyze_cvd_divergence(snapshot: Snapshot, cfg=None) -> CvdDivergenceContext:
+    """Componenta CVD Divergence - pura, determinista, cauzala. Compara swing-uri
+    STRUCTURALE de pret cu CVD. FORMING cand swing-ul recent nu e inca confirmabil cauzal."""
+    c = {**CVD_DIVERGENCE_DEFAULTS, **(cfg or {})}
+    n = len(snapshot)
+    high, low, cvd, t = snapshot.high, snapshot.low, snapshot.cvd, snapshot.t
+    L, R = int(c["left"]), int(c["right"])
+    cvd_now = float(cvd[-1]) if n else 0.0
+
+    def result(state, status="NONE", pdir="NONE", cdir="NONE", strength=0.0,
+               s1=None, s2=None, slope=0.0, momentum="FLAT"):
+        r1 = s1 or (0, 0.0, 0.0, 0)
+        r2 = s2 or (0, 0.0, 0.0, 0)
+        return CvdDivergenceContext(
+            cvd_value=cvd_now, cvd_slope=slope, cvd_momentum=momentum, state=state,
+            status=status, price_swing_direction=pdir, cvd_swing_direction=cdir,
+            strength=float(strength), confirmation_window=R,
+            ref1_epoch=int(r1[3]), ref1_price=float(r1[1]), ref1_cvd=float(r1[2]),
+            ref2_epoch=int(r2[3]), ref2_price=float(r2[1]), ref2_cvd=float(r2[2]))
+
+    if n < L + R + 2:
+        return result("INSUFFICIENT_EVIDENCE")
+    last = n - 1
+
+    # panta + momentum CVD (adaptive deadband)
+    sw = min(int(c["slope_window"]), last)
+    change = float(cvd[-1] - cvd[-1 - sw]) if sw > 0 else 0.0
+    slope = change / sw if sw > 0 else 0.0
+    seg = cvd[max(0, last - int(c["scale_lookback"])):last + 1]
+    cvd_spread = float(np.std(seg)) if len(seg) > 1 else 0.0
+    band = c["momentum_deadband_ratio"] * cvd_spread
+    momentum = "RISING" if change > band else "FALLING" if change < -band else "FLAT"
+
+    # scale adaptive
+    ranges = (high - low)[max(0, last - int(c["scale_lookback"])):last + 1]
+    price_min = c["price_ratio"] * float(np.median(ranges)) if len(ranges) else 0.0
+    cvd_min = c["cvd_ratio"] * cvd_spread
+
+    hi_idx = _swings(high, L, R, last, "high")
+    lo_idx = _swings(low, L, R, last, "low")
+    p_hi = _pending_swing(high, L, R, last, "high")
+    p_lo = _pending_swing(low, L, R, last, "low")
+
+    def pt(k, arr):
+        return (k, float(arr[k]), float(cvd[k]), int(round(t[k])))
+
+    # perechi candidate: (second_k, is_forming, kind, s1, s2)
+    pairs = []
+    if len(hi_idx) >= 2:
+        pairs.append((hi_idx[-1], False, "high", pt(hi_idx[-2], high), pt(hi_idx[-1], high)))
+    if len(lo_idx) >= 2:
+        pairs.append((lo_idx[-1], False, "low", pt(lo_idx[-2], low), pt(lo_idx[-1], low)))
+    if p_hi is not None and len(hi_idx) >= 1 and p_hi > hi_idx[-1]:
+        pairs.append((p_hi, True, "high", pt(hi_idx[-1], high), pt(p_hi, high)))
+    if p_lo is not None and len(lo_idx) >= 1 and p_lo > lo_idx[-1]:
+        pairs.append((p_lo, True, "low", pt(lo_idx[-1], low), pt(p_lo, low)))
+
+    diverging, no_div = [], None
+    for second_k, forming, kind, s1, s2 in pairs:
+        state, pdir, cdir, strength = _eval_divergence(kind, s1, s2, price_min, cvd_min, cvd_spread)
+        if state is not None:
+            diverging.append((second_k, forming, state, pdir, cdir, strength, s1, s2))
+        elif not forming and (no_div is None or second_k > no_div[0]):
+            no_div = (second_k, pdir, cdir, s1, s2)
+
+    if diverging:
+        second_k, forming, state, pdir, cdir, strength, s1, s2 = max(diverging, key=lambda x: x[0])
+        return result(state, "FORMING" if forming else "CONFIRMED", pdir, cdir, strength,
+                      s1, s2, slope, momentum)
+
+    has_confirmed_pair = len(hi_idx) >= 2 or len(lo_idx) >= 2
+    if has_confirmed_pair:
+        pdir, cdir = (no_div[1], no_div[2]) if no_div else ("NONE", "NONE")
+        s1, s2 = (no_div[3], no_div[4]) if no_div else (None, None)
+        return result("NO_DIVERGENCE", "CONFIRMED", pdir, cdir, 0.0, s1, s2, slope, momentum)
+    return result("INSUFFICIENT_EVIDENCE", "NONE", "NONE", "NONE", 0.0, None, None, slope, momentum)
+
+
 # ------------------------------------------------------------------ ContextEngine
 class ContextEngine:
     """
@@ -624,6 +782,7 @@ class ContextEngine:
             "price_progress": analyze_price_progress(snapshot, self.config.get("price_progress")),
             "absorption": analyze_absorption(snapshot, self.config.get("absorption")),
             "exhaustion": analyze_exhaustion(snapshot, self.config.get("exhaustion")),
+            "cvd_divergence": analyze_cvd_divergence(snapshot, self.config.get("cvd_divergence")),
         }
         if n == 0:
             return ContextResult(now_epoch=int(snapshot.now_epoch), n_bars=0,

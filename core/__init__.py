@@ -10,7 +10,9 @@ from core.context_engine import (ContextEngine, ContextResult, Snapshot,
                                  AbsorptionContext, analyze_absorption,
                                  ABSORPTION_STATES, ABSORPTION_DEFAULTS,
                                  ExhaustionContext, analyze_exhaustion,
-                                 EXHAUSTION_STATES, EXHAUSTION_DEFAULTS)
+                                 EXHAUSTION_STATES, EXHAUSTION_DEFAULTS,
+                                 CvdDivergenceContext, analyze_cvd_divergence,
+                                 CVD_DIVERGENCE_STATES, CVD_DIVERGENCE_DEFAULTS)
 
 __all__ = [
     "VolumeProfileEngine",
@@ -39,4 +41,8 @@ __all__ = [
     "analyze_exhaustion",
     "EXHAUSTION_STATES",
     "EXHAUSTION_DEFAULTS",
+    "CvdDivergenceContext",
+    "analyze_cvd_divergence",
+    "CVD_DIVERGENCE_STATES",
+    "CVD_DIVERGENCE_DEFAULTS",
 ]
