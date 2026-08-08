@@ -149,6 +149,111 @@ class ContextResult:
     components: dict = field(default_factory=dict)
 
 
+# ================================================================== P4.1 — DELTA
+# Praguri IMPLICITE (adaptive, NU absolute). Toate sunt raportate la o SCALA calculata
+# din delta recenta (mediana |delta| pe fereastra) -> se adapteaza la activitatea zilei,
+# nu la un numar fix de contracte. Configurabile prin ContextEngine(config={"delta": {...}}).
+DELTA_DEFAULTS = {
+    "lookback": 7,           # cate bare inapoi formeaza secventa recenta + scala
+    "neutral_ratio": 0.5,    # |delta| < neutral_ratio * scala -> flow neglijabil (NEUTRAL)
+    "aggression_ratio": 1.2,  # |delta| >= aggression_ratio * scala -> nivel de "agresiune"
+    "accel_tol": 0.15,       # toleranta la variatia de magnitudine (accelerare/decelerare)
+}
+
+
+@dataclass
+class DeltaContext:
+    """
+    Interpretarea Delta la momentul T - OBSERVATII, nu semnal. Expune componentele
+    individual (userul le vede pe fiecare), NU "pozitiv=BUY". Clasificarea se bazeaza pe
+    EVOLUTIA delta (directie + magnitudine + variatie), cu praguri adaptive la scala recenta.
+    """
+    current_delta: float            # delta barei curente (la T)
+    previous_delta: float           # delta barei anterioare (None daca nu exista)
+    delta_change: float             # current - previous (None daca nu exista precedenta)
+    delta_direction: str            # POSITIVE | NEGATIVE | FLAT
+    momentum: str                   # BUYING | SELLING | NEUTRAL (directia neta recenta)
+    acceleration: str               # ACCELERATING | DECELERATING | STEADY (magnitudine vs precedenta)
+    recent_sequence: list           # ultimele `lookback` delta (cronologic)
+    scale: float                    # scala adaptiva (mediana |delta| recent) - expusa pt transparenta
+    sequence_state: str             # vezi DELTA_STATES
+
+
+# Starile posibile ale secventei de delta (descriptive, simetrice):
+DELTA_STATES = (
+    "NEUTRAL", "DELTA_FLIP",
+    "BUYING_AGGRESSION", "BUYING_ACCELERATION", "BUYING_DECELERATION",
+    "SELLING_AGGRESSION", "SELLING_ACCELERATION", "SELLING_DECELERATION",
+)
+
+
+def _classify_delta_state(cur, prev, neutral, acceleration, side):
+    """Regula de clasificare (pura). Ordine: neutral -> flip -> accel/decel -> agresiune sustinuta."""
+    if cur == 0.0 or abs(cur) < neutral:
+        return "NEUTRAL"
+    # DELTA_FLIP: semnul curent difera de al barei anterioare (ambele non-neglijabile)
+    if prev is not None and prev != 0.0 and (cur > 0) != (prev > 0):
+        return "DELTA_FLIP"
+    if acceleration == "ACCELERATING":
+        return f"{side}_ACCELERATION"
+    if acceleration == "DECELERATING":
+        return f"{side}_DECELERATION"
+    return f"{side}_AGGRESSION"          # sustinut (magnitudine ~constanta)
+
+
+def analyze_delta(snapshot: Snapshot, cfg=None) -> DeltaContext:
+    """
+    Componenta Delta - functie PURA, DETERMINISTA, CAUZALA de Snapshot.
+    Delta per bara = diferenta CVD-ului (cvd e cauzal, feliat la <= T). Nu foloseste
+    pretul, nu stie de Price Action, nu emite BUY/SELL.
+    """
+    c = {**DELTA_DEFAULTS, **(cfg or {})}
+    cvd = np.asarray(snapshot.cvd, dtype=float)
+    deltas = np.diff(cvd, prepend=0.0) if len(cvd) else np.zeros(0)
+    n = len(deltas)
+    if n == 0:
+        return DeltaContext(0.0, None, None, "FLAT", "NEUTRAL", "STEADY", [], 0.0, "NEUTRAL")
+
+    cur = float(deltas[-1])
+    prev = float(deltas[-2]) if n >= 2 else None
+    recent = deltas[-int(c["lookback"]):]
+    scale = float(np.median(np.abs(recent)))
+    if scale <= 0.0:
+        scale = max(abs(cur), 1e-9)      # degenerat (delta recent ~0) -> evita impartirea la 0
+    neutral = c["neutral_ratio"] * scale
+
+    direction = "POSITIVE" if cur > 0 else "NEGATIVE" if cur < 0 else "FLAT"
+
+    rmean = float(np.mean(recent))
+    momentum = "NEUTRAL" if abs(rmean) < neutral else ("BUYING" if rmean > 0 else "SELLING")
+
+    if prev is None:
+        acceleration = "STEADY"
+    else:
+        ap, ac, tol = abs(prev), abs(cur), c["accel_tol"]
+        if ac > ap * (1 + tol):
+            acceleration = "ACCELERATING"
+        elif ac < ap * (1 - tol):
+            acceleration = "DECELERATING"
+        else:
+            acceleration = "STEADY"
+
+    side = "BUYING" if cur > 0 else "SELLING"
+    state = _classify_delta_state(cur, prev, neutral, acceleration, side)
+
+    return DeltaContext(
+        current_delta=cur,
+        previous_delta=prev,
+        delta_change=(cur - prev) if prev is not None else None,
+        delta_direction=direction,
+        momentum=momentum,
+        acceleration=acceleration,
+        recent_sequence=[float(x) for x in recent],
+        scale=scale,
+        sequence_state=state,
+    )
+
+
 # ------------------------------------------------------------------ ContextEngine
 class ContextEngine:
     """
@@ -170,9 +275,11 @@ class ContextEngine:
     def analyze(self, snapshot: Snapshot) -> ContextResult:
         """Snapshot cauzal -> ContextResult. Pura, determinista, fara look-ahead."""
         n = len(snapshot)
+        # Componente de order flow (fiecare = functie pura de Snapshot). P4.1: doar Delta.
+        components = {"delta": analyze_delta(snapshot, self.config.get("delta"))}
         if n == 0:
             return ContextResult(now_epoch=int(snapshot.now_epoch), n_bars=0,
-                                 last_price=0.0, poc=0.0, cvd=0.0)
+                                 last_price=0.0, poc=0.0, cvd=0.0, components=components)
         return ContextResult(
             now_epoch=int(snapshot.now_epoch),
             n_bars=n,
@@ -180,5 +287,5 @@ class ContextEngine:
             poc=float(snapshot.poc),
             cvd=float(snapshot.cvd[-1]),
             overall="NEUTRAL",
-            components={},
+            components=components,
         )
