@@ -171,7 +171,8 @@ class ContextResult:
     last_price: float       # close la T
     poc: float              # developing POC la T (cauzal)
     cvd: float              # Cumulative Delta la T
-    overall: str = "NEUTRAL"
+    overall: str = "NEUTRAL"    # SUPPORTIVE | NEUTRAL | CONTRADICTING | INSUFFICIENT_EVIDENCE
+    reasons: list = field(default_factory=list)   # explicatii transparente pt `overall`
     components: dict = field(default_factory=dict)
 
 
@@ -1390,6 +1391,96 @@ def analyze_composite_context(snapshot: Snapshot, cfg=None) -> CompositeContextC
                                    confluence_levels, has_confluence, agreement, context, reasons)
 
 
+# ================================================================== P6 — EXECUTION CONTEXT SUMMARY
+# `overall` = REZUMAT TRANSPARENT al contextului, prin REGULI EXPLICABILE (cu `reasons`).
+# NU e scor / probabilitate / ML / BUY-SELL / entry signal. Componentele raman separate,
+# vizibile individual. Directia din componente e folosita DOAR ca sa vedem daca dovezile
+# sunt COERENTE (o singura directie) sau in CONFLICT - niciodata ca decizie de trade.
+OVERALL_STATES = ("SUPPORTIVE", "NEUTRAL", "CONTRADICTING", "INSUFFICIENT_EVIDENCE")
+
+_BULL_DELTA = {"BUYING_AGGRESSION", "BUYING_ACCELERATION"}
+_BEAR_DELTA = {"SELLING_AGGRESSION", "SELLING_ACCELERATION"}
+
+# Fraze descriptive (transparenta) - traduc starile in limbaj, fara verdict.
+_DELTA_PHRASE = {
+    "BUYING_AGGRESSION": "buying aggression is strong",
+    "BUYING_ACCELERATION": "buying aggression is accelerating",
+    "BUYING_DECELERATION": "buying pressure is decelerating",
+    "SELLING_AGGRESSION": "selling aggression is strong",
+    "SELLING_ACCELERATION": "selling aggression is accelerating",
+    "SELLING_DECELERATION": "selling pressure is decelerating",
+    "DELTA_FLIP": "delta just flipped direction",
+}
+_PROGRESS_PHRASE = {
+    "AGGRESSION_WITHOUT_PROGRESS": "aggressive flow is producing little price progress",
+    "AGGRESSION_WITH_PROGRESS": "aggression is producing price progress",
+    "PROGRESS_WITHOUT_AGGRESSION": "price is moving with little aggression",
+}
+
+
+def _execution_summary(components):
+    """Deriva (overall, reasons) din componente, prin reguli transparente. Pur, determinist."""
+    reasons = []
+    dl = components["delta"]; pp = components["price_progress"]
+    ab = components["absorption"]; ex = components["exhaustion"]
+    cv = components["cvd_divergence"]; poc = components["poc_migration"]
+    lvn = components["lvn_interaction"]; tape = components["tape_speed"]
+    sess = components["session_context"]; comp = components["composite_context"]
+
+    # dovezi directionale (DOAR ca sa masuram coerenta vs conflict; NU decizie de trade)
+    bull = bear = 0
+    if dl.sequence_state in _BULL_DELTA:
+        bull += 1
+    elif dl.sequence_state in _BEAR_DELTA:
+        bear += 1
+    if cv.state == "BULLISH_DIVERGENCE" and cv.status == "CONFIRMED":
+        bull += 1
+    elif cv.state == "BEARISH_DIVERGENCE" and cv.status == "CONFIRMED":
+        bear += 1
+    if ab.status == "CONFIRMED":
+        bull += ab.kind == "bull"; bear += ab.kind == "bear"
+    if ex.status == "CONFIRMED":
+        bull += ex.kind == "bot"          # vanzatori epuizati la minim -> context bullish
+        bear += ex.kind == "top"          # cumparatori epuizati la maxim -> context bearish
+
+    # reasons descriptive (doar starile notabile)
+    if dl.sequence_state in _DELTA_PHRASE:
+        reasons.append(_DELTA_PHRASE[dl.sequence_state])
+    if pp.state in _PROGRESS_PHRASE:
+        reasons.append(_PROGRESS_PHRASE[pp.state])
+    if ab.detected and ab.status != "NONE":
+        reasons.append(f"{ab.kind}-side absorption {ab.status.lower()}")
+    if ex.detected and ex.status != "NONE":
+        reasons.append(f"{ex.kind} exhaustion {ex.status.lower()}")
+    if cv.state in ("BULLISH_DIVERGENCE", "BEARISH_DIVERGENCE"):
+        way = "bullishly" if "BULL" in cv.state else "bearishly"
+        reasons.append(f"CVD diverges {way} from price ({cv.status.lower()})")
+    if poc.state in ("POC_RISING", "POC_FALLING"):
+        reasons.append(f"value (POC) migrating {poc.direction.lower()}")
+    if lvn.detected and lvn.state != "INSUFFICIENT_EVIDENCE":
+        reasons.append(f"price is in {lvn.state.replace('_', ' ').lower()} at an LVN")
+    if tape.speed_level in ("HIGH", "LOW"):
+        reasons.append(f"tape speed is {tape.speed_level.lower()} and {tape.acceleration.lower()}")
+    if sess.available and sess.profiles:
+        reasons.append(f"price is {sess.profiles[0].location.replace('_', ' ').lower()} vs previous session")
+    if comp.available:
+        reasons.append(f"long-term timeframes: {comp.context.lower()} ({comp.agreement.lower()})")
+
+    # regula transparenta de overall
+    if pp.state == "INSUFFICIENT_EVIDENCE" and cv.state == "INSUFFICIENT_EVIDENCE":
+        overall = "INSUFFICIENT_EVIDENCE"
+    elif bull > 0 and bear > 0:
+        overall = "CONTRADICTING"
+    elif bull >= 2 and bear == 0:
+        overall = "SUPPORTIVE"
+    elif bear >= 2 and bull == 0:
+        overall = "SUPPORTIVE"
+    else:
+        overall = "NEUTRAL"
+    reasons.append(f"evidence: {bull} bullish / {bear} bearish -> {overall}")
+    return overall, reasons
+
+
 # ------------------------------------------------------------------ ContextEngine
 class ContextEngine:
     """
@@ -1412,7 +1503,7 @@ class ContextEngine:
         """Snapshot cauzal -> ContextResult. Pura, determinista, fara look-ahead."""
         n = len(snapshot)
         # Componente de order flow (fiecare = functie pura de Snapshot).
-        components = {
+        components: dict = {
             "delta": analyze_delta(snapshot, self.config.get("delta")),
             "price_progress": analyze_price_progress(snapshot, self.config.get("price_progress")),
             "absorption": analyze_absorption(snapshot, self.config.get("absorption")),
@@ -1427,13 +1518,16 @@ class ContextEngine:
         }
         if n == 0:
             return ContextResult(now_epoch=int(snapshot.now_epoch), n_bars=0,
-                                 last_price=0.0, poc=0.0, cvd=0.0, components=components)
+                                 last_price=0.0, poc=0.0, cvd=0.0,
+                                 overall="INSUFFICIENT_EVIDENCE", components=components)
+        overall, reasons = _execution_summary(components)   # rezumat transparent (P6)
         return ContextResult(
             now_epoch=int(snapshot.now_epoch),
             n_bars=n,
             last_price=float(snapshot.close[-1]),
             poc=float(snapshot.poc),
             cvd=float(snapshot.cvd[-1]),
-            overall="NEUTRAL",
+            overall=overall,
+            reasons=reasons,
             components=components,
         )

@@ -19,12 +19,14 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from data.loader import PARQUET_DIR, RAW_DIR
+from core import ContextEngine, snapshot_from_daydata
 from app.desktop import theme
 from app.desktop.data_service import (load_day, INTERVAL_SECONDS, resolve_ticks,
                                       prior_session_levels, profile_from_footprint,
                                       session_profiles, SESSION_DEFS, TICK_SIZE,
                                       BIG_TRADE_MIN, ABS_MIN_VOL, ABS_DOM, ABS_REJECT,
-                                      EXH_WINDOW, EXH_VOL_MULT, EXH_DELTA_FRAC)
+                                      EXH_WINDOW, EXH_VOL_MULT, EXH_DELTA_FRAC,
+                                      build_reference_levels, build_composite_levels)
 from app.desktop.charts import (CandlestickItem, ProfileOverlayItem, FootprintItem,
                                 GridStatsItem, StatsAxis)
 from app.desktop.replay import Replay
@@ -216,6 +218,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tz_name = "Romania"    # fus implicit (ora ta: 16:30 = deschidere NY)
         self._tz_offset = 3 * 3600   # provizoriu; recalculat corect per data in _apply_tz
         self._tz_label = "RO"
+        # Execution Context (P6): motor + niveluri de context cache-uite per zi
+        self._ctx_engine = ContextEngine()
+        self._ctx_ref_levels = []
+        self._ctx_comp_levels = []
+        self._ctx_levels_key = None
         self.replay_timer = QtCore.QTimer(self)
         self.replay_timer.timeout.connect(self._replay_tick)
         self.price.getViewBox().sigRangeChanged.connect(self._on_range_changed)
@@ -325,6 +332,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_grid.setToolTip("Grid de statistici jos: ΣV (volum) / ΔV (delta) / Δ% per lumanare, colorat heatmap")
         self.chk_cvd = QtWidgets.QCheckBox("CVD"); self.chk_cvd.setChecked(True)
         self.chk_cvd.setToolTip("Panoul Cumulative Delta (jos): presiunea neta agresiva de-a lungul sesiunii")
+        self.chk_ctx = QtWidgets.QCheckBox("Context"); self.chk_ctx.setChecked(False)
+        self.chk_ctx.setToolTip("Execution Context (P6): rezumat al order flow-ului la bara curenta\n"
+                                "(delta/progress/absorption/exhaustion/CVD/POC/LVN/tape/sesiune/composite).\n"
+                                "Observatii + overall transparent, NU semnal de BUY/SELL.")
 
         # ZIUA + buton "deschide fisier de ORIUNDE" (CSV/Parquet, ex. direct de pe Desktop)
         self.btn_open = QtWidgets.QToolButton(); self.btn_open.setText("📂")
@@ -374,6 +385,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_dev.stateChanged.connect(self._rerender_current)
         self.chk_grid.stateChanged.connect(self._on_grid_toggled)
         self.chk_cvd.stateChanged.connect(self._on_cvd_toggled)
+        self.chk_ctx.stateChanged.connect(self._on_ctx_toggled)
         self.chk_vwap.stateChanged.connect(lambda: self.vwap_curve.setVisible(self.chk_vwap.isChecked()))
         self.cbo_compare.currentIndexChanged.connect(self._on_compare_changed)
         self.cbo_tz.currentIndexChanged.connect(self._on_tz_changed)
@@ -540,6 +552,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.chk_exh); lay.addWidget(self.btn_exh_settings)
         lay.addWidget(self.chk_grid)
         lay.addWidget(self.chk_cvd)
+        lay.addWidget(self.chk_ctx)                                    # Execution Context (P6)
         lay.addWidget(self._sep())
         lay.addWidget(self.chk_prior)                                  # Context / sesiune
         lay.addWidget(self.chk_session)
@@ -945,11 +958,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.draw_mgr.on_avwap = self._add_avwap_anchor  # aVWAP: click -> ancora
         self._avwap_anchors = []   # epoci ancore Anchored VWAP
         self._avwap_items = []     # itemele grafice curente (re-desenate la _render)
+        # Panou Execution Context (P6) - text la dreapta graficului, ascuns implicit
+        self.ctx_panel = QtWidgets.QTextEdit()
+        self.ctx_panel.setReadOnly(True)
+        self.ctx_panel.setObjectName("CtxPanel")
+        self.ctx_panel.setFixedWidth(290)
+        self.ctx_panel.setVisible(False)
+        self.ctx_panel.setStyleSheet(
+            f"QTextEdit#CtxPanel{{background:{theme.BG};border:0;border-left:1px solid "
+            f"{theme.BORDER};padding:8px;}}")
+
         wrap = QtWidgets.QWidget()
         h = QtWidgets.QHBoxLayout(wrap)
         h.setContentsMargins(0, 0, 0, 0); h.setSpacing(0)
         h.addWidget(self._build_draw_toolbar())
         h.addWidget(self.glw, stretch=1)
+        h.addWidget(self.ctx_panel)
         return wrap
 
     def _build_draw_toolbar(self):
@@ -1656,6 +1680,8 @@ class MainWindow(QtWidgets.QMainWindow):
         pos = d.cum_delta >= 0
         self.card_delta.set_value(f"{d.cum_delta:+,.0f}", theme.UP if pos else theme.DOWN)
 
+        self._update_execution_context()   # Execution Context (P6) - doar daca panoul e vizibil
+
         # Sincronizeaza scrubber-ul + eticheta de pozitie cu lumanarea curenta din replay
         if self._replay is not None and len(d.t):
             idx = self._replay.current_candle_index()
@@ -1915,6 +1941,86 @@ class MainWindow(QtWidgets.QMainWindow):
         lay = self.glw.ci.layout
         lay.setRowStretchFactor(1, 1 if show else 0)
         lay.setRowMaximumHeight(1, 16777215 if show else 0)   # colapseaza randul CVD cand e stins
+
+    # ---------- Execution Context (P6) ----------
+    def _on_ctx_toggled(self, *a):
+        show = self.chk_ctx.isChecked()
+        self.ctx_panel.setVisible(show)
+        if show:
+            self._ensure_ctx_levels()
+            self._update_execution_context()
+
+    def _ensure_ctx_levels(self):
+        """Niveluri de context cache-uite per zi: sesiune precedenta + intraday + composite 15D.
+        Rapid (fara 90D) ca sa nu blocheze UI-ul; se recalculeaza doar cand se schimba ziua."""
+        fname = self.cbo_day.currentData()
+        key = (fname, self.cbo_res.currentText(), self._mode)
+        if key == self._ctx_levels_key or not fname:
+            return
+        self.setCursor(QtCore.Qt.WaitCursor)
+        try:
+            row = float(self.cbo_res.currentText())
+            va = float(self.cbo_va.currentText()) / 100.0
+            self._ctx_ref_levels = build_reference_levels(
+                fname, mode=self._mode, va_percent=va, row_size=row,
+                sessions=self._active_sessions())
+            self._ctx_comp_levels = build_composite_levels(
+                fname, spans=(15,), va_percent=va, row_size=row)
+            self._ctx_levels_key = key
+        except Exception:
+            self._ctx_ref_levels, self._ctx_comp_levels = [], []
+        finally:
+            self.unsetCursor()
+
+    def _update_execution_context(self):
+        """Construieste Snapshot-ul din bara curenta + niveluri, ruleaza ContextEngine si
+        randeaza panoul. Cauzal: snapshot_from_daydata foloseste doar barele <= curenta."""
+        if not self.chk_ctx.isChecked() or self._data is None or not len(self._data.t):
+            return
+        try:
+            snap = snapshot_from_daydata(self._data, reference_levels=self._ctx_ref_levels,
+                                         composite_levels=self._ctx_comp_levels)
+            self.ctx_panel.setHtml(self._render_execution_html(self._ctx_engine.analyze(snap)))
+        except Exception:
+            pass
+
+    def _render_execution_html(self, res):
+        c = res.components
+        ov_col = {"SUPPORTIVE": theme.UP, "CONTRADICTING": theme.DOWN,
+                  "NEUTRAL": theme.TEXT, "INSUFFICIENT_EVIDENCE": theme.TEXT_DIM}.get(
+            res.overall, theme.TEXT)
+
+        def rowh(label, val):
+            return (f'<tr><td style="color:{theme.TEXT_DIM};padding-right:10px">{label}</td>'
+                    f'<td>{val}</td></tr>')
+
+        sess, comp, ar, tape = (c["session_context"], c["composite_context"],
+                                c["acceptance_rejection"], c["tape_speed"])
+        rows = "".join([
+            rowh("Delta", c["delta"].sequence_state),
+            rowh("Progress", c["price_progress"].state),
+            rowh("Absorption", c["absorption"].state),
+            rowh("Exhaustion", c["exhaustion"].state),
+            rowh("CVD", c["cvd_divergence"].state),
+            rowh("POC", c["poc_migration"].state),
+            rowh("LVN", c["lvn_interaction"].state),
+            rowh("Level", f"{ar.node_kind} {ar.state}"),
+            rowh("Tape", f"{tape.speed_level} / {tape.acceleration}"),
+            rowh("Prev Session", sess.profiles[0].location
+                 if (sess.available and sess.profiles) else "—"),
+            rowh("Composite", comp.context if comp.available else "—"),
+        ])
+        reasons = "".join(f"<li>{r}</li>" for r in res.reasons)
+        line = f'<hr style="border:0;border-top:1px solid {theme.BORDER}">'
+        return (
+            f'<div style="font-family:Consolas,monospace;font-size:11px;color:{theme.TEXT}">'
+            f'<div style="letter-spacing:1px;color:{theme.TEXT_DIM}">EXECUTION CONTEXT</div>{line}'
+            f'<div style="font-size:13px">Overall: <b style="color:{ov_col}">{res.overall}</b></div>{line}'
+            f'<table>{rows}</table>{line}'
+            f'<div style="color:{theme.TEXT_DIM}">Context:</div>'
+            f'<ul style="margin:2px 0 0 -20px">{reasons}</ul>{line}'
+            f'<div style="color:{theme.TEXT_DIM};font-style:italic">Order flow context only. '
+            f'Your price-action setup decides execution.</div></div>')
 
     def _on_compare_changed(self, *a):
         """Session Browser + Compare: suprapune profilul + nivelurile unei alte sesiuni
