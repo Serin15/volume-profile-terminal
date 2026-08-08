@@ -154,9 +154,24 @@ def test_execution_context_panel_renders():
     from app.desktop.main import MainWindow
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     win = MainWindow()
+
+    # Clean Chart (P7): markerele pornesc STINSE
+    assert not win.chk_big.isChecked() and not win.chk_abs.isChecked() and not win.chk_exh.isChecked()
+
     win.chk_ctx.setChecked(True)                    # activeaza panoul -> calculeaza + randeaza
     html = win.ctx_panel.toPlainText()
     assert "EXECUTION CONTEXT" in html and "Overall" in html
-    assert "price-action setup" in html            # disclaimerul (nu BUY/SELL)
+    assert "FLOW" in html                           # panou pe sectiuni
+    assert "price-action setup" in html             # disclaimerul (nu BUY/SELL)
+    assert "TECHNICAL DETAILS" not in html          # ascuns implicit
+
+    # Context-at-cursor: randare la o bara anume (cauzal, upto_index)
+    win._update_execution_context(3)
+    assert "Overall" in win.ctx_panel.toPlainText()
+
+    # Technical Details expandable
+    win.chk_ctx_tech.setChecked(True)
+    assert "TECHNICAL DETAILS" in win.ctx_panel.toPlainText()
+
     win.chk_ctx.setChecked(False)                   # se ascunde curat
-    assert win.ctx_panel.isVisible() is False
+    assert win.ctx_container.isVisible() is False

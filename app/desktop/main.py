@@ -174,6 +174,59 @@ VIEWS = {
 }
 
 
+# Traduceri human-readable pentru panoul Execution Context (P7). Enum-urile brute raman
+# disponibile in Technical Details; aici doar propozitii pentru trader. Descriptiv, NU semnal.
+_HR_DELTA = {
+    "SELLING_DECELERATION": "Selling pressure is decelerating",
+    "SELLING_AGGRESSION": "Selling aggression is strong",
+    "SELLING_ACCELERATION": "Selling aggression is accelerating",
+    "BUYING_DECELERATION": "Buying pressure is decelerating",
+    "BUYING_AGGRESSION": "Buying aggression is strong",
+    "BUYING_ACCELERATION": "Buying aggression is accelerating",
+    "DELTA_FLIP": "Delta just flipped direction",
+    "NEUTRAL": "Delta is balanced",
+}
+_HR_PROGRESS = {
+    "AGGRESSION_WITHOUT_PROGRESS": "Aggression is producing little price progress",
+    "AGGRESSION_WITH_PROGRESS": "Aggression is producing price progress",
+    "PROGRESS_WITHOUT_AGGRESSION": "Price is moving with little aggression",
+    "QUIET": "Quiet — little effort, little movement",
+    "NEUTRAL": "Effort vs result is balanced",
+    "INSUFFICIENT_EVIDENCE": "Not enough data",
+}
+_HR_CVD = {
+    "BULLISH_DIVERGENCE": "CVD is not confirming the downside",
+    "BEARISH_DIVERGENCE": "CVD is not confirming the upside",
+    "NO_DIVERGENCE": "CVD confirms price",
+    "INSUFFICIENT_EVIDENCE": "Not enough swings yet",
+}
+_HR_POC = {
+    "POC_SIDEWAYS": "Value remains anchored",
+    "POC_RISING": "Value is migrating up",
+    "POC_FALLING": "Value is migrating down",
+    "INSUFFICIENT_EVIDENCE": "Not enough data",
+}
+_HR_LVN = {
+    "TEST": "Price is testing the LVN",
+    "REJECTION": "Price rejected the LVN",
+    "ACCEPTANCE": "Price is being accepted at the LVN",
+    "FAST_TRAVERSAL": "Price passed quickly through the LVN",
+    "FAILED_REJECTION": "LVN rejection failed (now accepted)",
+}
+_HR_INTER = {
+    "TEST": "being tested", "REJECTION": "rejected", "ACCEPTANCE": "accepted",
+    "FAST_TRAVERSAL": "passed through", "FAILED_REJECTION": "failed rejection",
+}
+_HR_LOC = {
+    "ABOVE_VALUE": "Above previous value", "BELOW_VALUE": "Below previous value",
+    "INSIDE_VALUE": "Inside previous value", "UNKNOWN": "Unknown",
+}
+_HR_COMP = {
+    "SUPPORTIVE": "Long-term timeframes agree", "CONTRADICTING": "Long-term timeframes conflict",
+    "NEUTRAL": "Long-term context is mixed", "INSUFFICIENT_EVIDENCE": "Not enough long-term data",
+}
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -223,6 +276,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ctx_ref_levels = []
         self._ctx_comp_levels = []
         self._ctx_levels_key = None
+        self._ctx_last_bar = None   # throttle: ultima bara pt care s-a randat contextul
         self.replay_timer = QtCore.QTimer(self)
         self.replay_timer.timeout.connect(self._replay_tick)
         self.price.getViewBox().sigRangeChanged.connect(self._on_range_changed)
@@ -315,9 +369,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_nodes = QtWidgets.QCheckBox("HVN/LVN"); self.chk_nodes.setChecked(True)
         self.chk_vwap = QtWidgets.QCheckBox("VWAP"); self.chk_vwap.setChecked(True)
         self.chk_vwap.setToolTip("VWAP developing (curba portocalie): pretul mediu al sesiunii ponderat cu volumul")
-        self.chk_big = QtWidgets.QCheckBox("Big Trades"); self.chk_big.setChecked(True)
-        self.chk_abs = QtWidgets.QCheckBox("Absorption"); self.chk_abs.setChecked(True)
-        self.chk_exh = QtWidgets.QCheckBox("Exhaustion"); self.chk_exh.setChecked(True)
+        # Clean Chart (P7): markerele pornesc STINSE - graficul e curat, engine-ul calculeaza tot.
+        self.chk_big = QtWidgets.QCheckBox("Big Trades"); self.chk_big.setChecked(False)
+        self.chk_abs = QtWidgets.QCheckBox("Absorption"); self.chk_abs.setChecked(False)
+        self.chk_exh = QtWidgets.QCheckBox("Exhaustion"); self.chk_exh.setChecked(False)
         self.chk_exh.setToolTip("Climax de volum + delta la o extrema noua (ultimul impuls, potential reversal)")
         self.chk_prior = QtWidgets.QCheckBox("Ieri"); self.chk_prior.setChecked(True)
         self.chk_prior.setToolTip("Nivelurile sesiunii precedente: yPOC / yVAH / yVAL + PDH / PDL")
@@ -958,22 +1013,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.draw_mgr.on_avwap = self._add_avwap_anchor  # aVWAP: click -> ancora
         self._avwap_anchors = []   # epoci ancore Anchored VWAP
         self._avwap_items = []     # itemele grafice curente (re-desenate la _render)
-        # Panou Execution Context (P6) - text la dreapta graficului, ascuns implicit
+        # Panou Execution Context (P6/P7) - text la dreapta graficului, ascuns implicit,
+        # cu un toggle "Technical Details" deasupra (STEP 6).
         self.ctx_panel = QtWidgets.QTextEdit()
         self.ctx_panel.setReadOnly(True)
         self.ctx_panel.setObjectName("CtxPanel")
-        self.ctx_panel.setFixedWidth(290)
-        self.ctx_panel.setVisible(False)
         self.ctx_panel.setStyleSheet(
-            f"QTextEdit#CtxPanel{{background:{theme.BG};border:0;border-left:1px solid "
-            f"{theme.BORDER};padding:8px;}}")
+            f"QTextEdit#CtxPanel{{background:{theme.BG};border:0;padding:8px;}}")
+        self.chk_ctx_tech = QtWidgets.QCheckBox("Technical Details")
+        self.chk_ctx_tech.setChecked(False)
+        self.chk_ctx_tech.setToolTip("Arata valorile brute + starile tehnice ale componentelor.")
+        self.chk_ctx_tech.stateChanged.connect(
+            lambda: self._update_execution_context(self._ctx_last_bar))
+        self.ctx_container = QtWidgets.QWidget()
+        self.ctx_container.setObjectName("CtxContainer")
+        self.ctx_container.setFixedWidth(300)
+        self.ctx_container.setVisible(False)
+        self.ctx_container.setStyleSheet(
+            f"QWidget#CtxContainer{{border-left:1px solid {theme.BORDER};}}")
+        cv = QtWidgets.QVBoxLayout(self.ctx_container)
+        cv.setContentsMargins(0, 4, 0, 0); cv.setSpacing(2)
+        cv.addWidget(self.chk_ctx_tech)
+        cv.addWidget(self.ctx_panel, stretch=1)
 
         wrap = QtWidgets.QWidget()
         h = QtWidgets.QHBoxLayout(wrap)
         h.setContentsMargins(0, 0, 0, 0); h.setSpacing(0)
         h.addWidget(self._build_draw_toolbar())
         h.addWidget(self.glw, stretch=1)
-        h.addWidget(self.ctx_panel)
+        h.addWidget(self.ctx_container)
         return wrap
 
     def _build_draw_toolbar(self):
@@ -1218,6 +1286,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cross_label.setPos(snapped, pt.y())
         self._update_level_tip(vb, pt)
         self._marker_hover_at(vb, pt)   # tooltip markere (livrat MANUAL, vezi metoda)
+        # Context-at-Cursor (P7): actualizeaza panoul la bara de sub cursor, doar cand se
+        # schimba bara (throttle) si doar daca panoul e activ. Cauzal (upto_index=i).
+        if self.chk_ctx.isChecked() and d is not None and len(d.t):
+            i = int(round((snapped - float(d.t[0])) / d.bar_seconds))
+            i = max(0, min(i, len(d.t) - 1))
+            if i != self._ctx_last_bar:
+                self._update_execution_context(i)
 
     def _marker_hover_at(self, vb, pt):
         """Tooltip pe markere (Big Trades / Absorption / Exhaustion) livrat MANUAL din
@@ -1945,7 +2020,7 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------- Execution Context (P6) ----------
     def _on_ctx_toggled(self, *a):
         show = self.chk_ctx.isChecked()
-        self.ctx_panel.setVisible(show)
+        self.ctx_container.setVisible(show)
         if show:
             self._ensure_ctx_levels()
             self._update_execution_context()
@@ -1972,55 +2047,109 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             self.unsetCursor()
 
-    def _update_execution_context(self):
-        """Construieste Snapshot-ul din bara curenta + niveluri, ruleaza ContextEngine si
-        randeaza panoul. Cauzal: snapshot_from_daydata foloseste doar barele <= curenta."""
+    def _update_execution_context(self, bar_index=None):
+        """Ruleaza ContextEngine la bara `bar_index` (implicit ultima = bara curenta din replay)
+        si randeaza panoul. CAUZAL: snapshot_from_daydata feliaza la <= bar_index (dev_poc /
+        footprint / cvd / niveluri gate-uite pe now_epoch) -> nicio informatie din viitor."""
         if not self.chk_ctx.isChecked() or self._data is None or not len(self._data.t):
             return
         try:
-            snap = snapshot_from_daydata(self._data, reference_levels=self._ctx_ref_levels,
+            n = len(self._data.t)
+            idx = (n - 1) if bar_index is None else max(0, min(int(bar_index), n - 1))
+            snap = snapshot_from_daydata(self._data, upto_index=idx,
+                                         reference_levels=self._ctx_ref_levels,
                                          composite_levels=self._ctx_comp_levels)
             self.ctx_panel.setHtml(self._render_execution_html(self._ctx_engine.analyze(snap)))
+            self._ctx_last_bar = idx
         except Exception:
             pass
 
     def _render_execution_html(self, res):
+        """Panou pe SECTIUNI (FLOW/STRUCTURE/LEVELS/LOCATION), human-readable, ascunde starile
+        NONE (raman in Technical Details). Descriptiv, NU semnal."""
         c = res.components
+        dim = theme.TEXT_DIM
+        ov = res.overall
         ov_col = {"SUPPORTIVE": theme.UP, "CONTRADICTING": theme.DOWN,
-                  "NEUTRAL": theme.TEXT, "INSUFFICIENT_EVIDENCE": theme.TEXT_DIM}.get(
-            res.overall, theme.TEXT)
+                  "NEUTRAL": theme.TEXT, "INSUFFICIENT_EVIDENCE": dim}.get(ov, theme.TEXT)
+        line = f'<hr style="border:0;border-top:1px solid {theme.BORDER};margin:6px 0">'
 
-        def rowh(label, val):
-            return (f'<tr><td style="color:{theme.TEXT_DIM};padding-right:10px">{label}</td>'
-                    f'<td>{val}</td></tr>')
+        def section(title, rows):
+            rows = [r for r in rows if r]
+            if not rows:
+                return ""
+            body = "".join(
+                f'<tr><td style="color:{dim};padding-right:8px;white-space:nowrap;'
+                f'vertical-align:top">{lab}</td><td>{val}</td></tr>' for lab, val in rows)
+            return (f'<div style="color:{theme.ACCENT};font-size:10px;letter-spacing:1px;'
+                    f'margin-top:7px">{title}</div><table>{body}</table>')
 
-        sess, comp, ar, tape = (c["session_context"], c["composite_context"],
-                                c["acceptance_rejection"], c["tape_speed"])
-        rows = "".join([
-            rowh("Delta", c["delta"].sequence_state),
-            rowh("Progress", c["price_progress"].state),
-            rowh("Absorption", c["absorption"].state),
-            rowh("Exhaustion", c["exhaustion"].state),
-            rowh("CVD", c["cvd_divergence"].state),
-            rowh("POC", c["poc_migration"].state),
-            rowh("LVN", c["lvn_interaction"].state),
-            rowh("Level", f"{ar.node_kind} {ar.state}"),
-            rowh("Tape", f"{tape.speed_level} / {tape.acceleration}"),
-            rowh("Prev Session", sess.profiles[0].location
-                 if (sess.available and sess.profiles) else "—"),
-            rowh("Composite", comp.context if comp.available else "—"),
-        ])
+        dl, pp, tp = c["delta"], c["price_progress"], c["tape_speed"]
+        ab, ex, cv = c["absorption"], c["exhaustion"], c["cvd_divergence"]
+        poc, lvn, ar = c["poc_migration"], c["lvn_interaction"], c["acceptance_rejection"]
+        sess, comp = c["session_context"], c["composite_context"]
+        forming = lambda st: " (forming)" if st == "FORMING" else ""
+
+        flow = [("Delta", _HR_DELTA.get(dl.sequence_state, dl.sequence_state)),
+                ("Progress", _HR_PROGRESS.get(pp.state, pp.state))]
+        if tp.speed_level != "INSUFFICIENT_EVIDENCE":
+            flow.append(("Tape", f"Trading activity is {tp.speed_level.lower()} "
+                                 f"and {tp.acceleration.lower()}"))
+
+        struct = [("CVD", _HR_CVD.get(cv.state, cv.state) + forming(cv.status))]
+        if ab.detected and ab.status != "NONE":
+            struct.append(("Absorption", f"{'Buy' if ab.kind == 'bull' else 'Sell'}-side "
+                                         f"absorption ({ab.status.lower()})"))
+        if ex.detected and ex.status != "NONE":
+            struct.append(("Exhaustion", f"{'Top' if ex.kind == 'top' else 'Bottom'} "
+                                        f"exhaustion ({ex.status.lower()})"))
+
+        levels = []
+        if lvn.detected and lvn.state in _HR_LVN:
+            levels.append(("LVN", _HR_LVN[lvn.state] + forming(lvn.status)))
+        if ar.detected and ar.state in _HR_INTER:
+            levels.append((ar.node_kind.upper(),
+                           f"{ar.node_kind.upper()} {_HR_INTER[ar.state]}" + forming(ar.status)))
+        if poc.state != "INSUFFICIENT_EVIDENCE":
+            levels.append(("POC", _HR_POC.get(poc.state, poc.state)))
+
+        loc = []
+        if sess.available and sess.profiles:
+            loc.append(("Prev Session", _HR_LOC.get(sess.profiles[0].location,
+                                                    sess.profiles[0].location)))
+        if comp.available:
+            loc.append(("Composite", _HR_COMP.get(comp.context, comp.context)))
+
         reasons = "".join(f"<li>{r}</li>" for r in res.reasons)
-        line = f'<hr style="border:0;border-top:1px solid {theme.BORDER}">'
+
+        tech = ""
+        if self.chk_ctx_tech.isChecked():
+            def fmt(v):
+                if isinstance(v, float):
+                    return f"{v:.2f}"
+                if isinstance(v, (list, tuple)):
+                    return f"[{len(v)}]"
+                return str(v)
+            blocks = []
+            for name, comp in res.components.items():
+                fields = " · ".join(f"{k}={fmt(v)}" for k, v in vars(comp).items())
+                blocks.append(f'<div style="color:{theme.ACCENT};margin-top:4px;font-size:10px">'
+                              f'{name}</div><div style="color:{dim};font-size:10px">{fields}</div>')
+            tech = (line + f'<div style="color:{dim};letter-spacing:1px">TECHNICAL DETAILS</div>'
+                    f'<div style="color:{dim};font-size:10px">overall={ov} · n_bars={res.n_bars} '
+                    f'· now={res.now_epoch}</div>' + "".join(blocks))
+
         return (
-            f'<div style="font-family:Consolas,monospace;font-size:11px;color:{theme.TEXT}">'
-            f'<div style="letter-spacing:1px;color:{theme.TEXT_DIM}">EXECUTION CONTEXT</div>{line}'
-            f'<div style="font-size:13px">Overall: <b style="color:{ov_col}">{res.overall}</b></div>{line}'
-            f'<table>{rows}</table>{line}'
-            f'<div style="color:{theme.TEXT_DIM}">Context:</div>'
-            f'<ul style="margin:2px 0 0 -20px">{reasons}</ul>{line}'
-            f'<div style="color:{theme.TEXT_DIM};font-style:italic">Order flow context only. '
-            f'Your price-action setup decides execution.</div></div>')
+            f'<div style="font-family:Segoe UI,Arial,sans-serif;font-size:11px;color:{theme.TEXT}">'
+            f'<div style="letter-spacing:1px;color:{dim}">EXECUTION CONTEXT</div>{line}'
+            f'<div style="font-size:14px">Overall: <b style="color:{ov_col}">{ov}</b></div>'
+            + section("FLOW", flow) + section("STRUCTURE", struct)
+            + section("LEVELS", levels) + section("LOCATION", loc)
+            + line + f'<div style="color:{dim}">Context:</div>'
+            + f'<ul style="margin:2px 0 0 -20px;padding:0">{reasons}</ul>'
+            + tech + line
+            + f'<div style="color:{dim};font-style:italic">Order flow context only.<br>'
+              f'Your price-action setup decides execution.</div></div>')
 
     def _on_compare_changed(self, *a):
         """Session Browser + Compare: suprapune profilul + nivelurile unei alte sesiuni
