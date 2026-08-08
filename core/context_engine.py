@@ -54,6 +54,7 @@ class Snapshot:
     footprint: dict         # DOAR barele <= T: {epoca: {pret: [buy, sell]}}
     row_size: float
     reference_levels: list = field(default_factory=list)   # niveluri sesiuni precedente (P2)
+    composite_levels: list = field(default_factory=list)   # niveluri composite 15D/90D (P3)
     symbol: str = ""
     tick_size: float = 0.25  # tick-ul instrumentului (NQ=0.25) - pt "ticks de progres"
     # Seria DEVELOPING POC (cumulativ pana la fiecare bara, cauzala) [0..k]. poc_series[-1]==poc.
@@ -79,7 +80,8 @@ def _levels_from_footprint(footprint, row_size, va_percent=0.70):
     return (r.poc or 0.0, r.vah or 0.0, r.val or 0.0)
 
 
-def snapshot_from_daydata(day, upto_index=None, va_percent=0.70, reference_levels=None) -> Snapshot:
+def snapshot_from_daydata(day, upto_index=None, va_percent=0.70, reference_levels=None,
+                          composite_levels=None) -> Snapshot:
     """
     Construieste un Snapshot CAUZAL dintr-un DayData, pastrand DOAR barele [0..upto_index].
 
@@ -93,6 +95,8 @@ def snapshot_from_daydata(day, upto_index=None, va_percent=0.70, reference_level
     """
     refs = (list(reference_levels) if reference_levels is not None
             else list(getattr(day, "reference_levels", [])))
+    comps = (list(composite_levels) if composite_levels is not None
+             else list(getattr(day, "composite_levels", [])))
     t_all = np.asarray(day.t)
     n = len(t_all)
     if n == 0:
@@ -101,7 +105,7 @@ def snapshot_from_daydata(day, upto_index=None, va_percent=0.70, reference_level
                         close=np.zeros(0), volume=np.zeros(0), cvd=np.zeros(0),
                         poc=0.0, vah=0.0, val=0.0, footprint={},
                         row_size=float(getattr(day, "row_size", 0.0)),
-                        reference_levels=refs,
+                        reference_levels=refs, composite_levels=comps,
                         symbol=getattr(day, "symbol", ""),
                         tick_size=float(getattr(day, "tick_size", 0.25)))
 
@@ -142,7 +146,7 @@ def snapshot_from_daydata(day, upto_index=None, va_percent=0.70, reference_level
         volume=col("volume"), cvd=col("cvd"),
         poc=float(poc), vah=float(vah), val=float(val),
         footprint=footprint, row_size=float(day.row_size),
-        reference_levels=refs,
+        reference_levels=refs, composite_levels=comps,
         symbol=getattr(day, "symbol", ""),
         tick_size=float(getattr(day, "tick_size", 0.25)),
         poc_series=poc_series, tps=tps_series,
@@ -1257,6 +1261,135 @@ def analyze_session_context(snapshot: Snapshot, cfg=None) -> SessionContextConte
     return SessionContextContext(True, price, profiles, nearest_ref, inter.state, inter.status)
 
 
+# ================================================================== P3 — COMPOSITE CONTEXT (15D/90D)
+# Structura pe termen mai lung (composite 15D/90D) + relatia pretului cu ea + CONFLUENTE/
+# CONFLICTE intre timeframe-uri (prev sesiune vs 15D vs 90D). "context" SUPPORTIVE/NEUTRAL/
+# CONTRADICTING = DOAR acordul structural intre timeframe-uri, prin REGULI TRANSPARENTE
+# (cu lista `reasons`). NU e verdict de trade, NU e scor, NU e directie/BUY-SELL.
+# Composite = istorie (N zile care se termina IERI) -> cauzal (available_from=0).
+COMPOSITE_CONTEXT_DEFAULTS = {
+    "cluster_ratio": 0.75,   # nivele in <= cluster_ratio * range recent de pret = "confluenta"
+}
+
+COMPOSITE_CONTEXT_STATES = ("SUPPORTIVE", "NEUTRAL", "CONTRADICTING")
+
+
+@dataclass
+class CompositeProfileRef:
+    span: str                # "15D" | "90D"
+    poc: float
+    vah: float
+    val: float
+    high: float
+    low: float
+    hvn: list
+    lvn: list
+    location: str            # ABOVE_VALUE | INSIDE_VALUE | BELOW_VALUE | UNKNOWN
+    poc_distance_ticks: float
+
+
+@dataclass
+class CompositeContextContext:
+    available: bool
+    price: float
+    composites: list                 # list[CompositeProfileRef]
+    timeframe_locations: list        # list[(label, location)] pt prev + 15D + 90D
+    confluence_levels: list          # list[LevelRef] grupate langa pretul curent (multi-timeframe)
+    has_confluence: bool
+    agreement: str                   # CONFLUENT_ABOVE/BELOW/INSIDE | MIXED | PARTIAL | INSUFFICIENT
+    context: str                     # SUPPORTIVE | NEUTRAL | CONTRADICTING (regula transparenta)
+    reasons: list                    # explicatii text (de ce = contextul respectiv)
+
+
+def _va_location(price, vah, val):
+    if vah > 0 and val > 0:
+        return "ABOVE_VALUE" if price > vah else "BELOW_VALUE" if price < val else "INSIDE_VALUE"
+    return "UNKNOWN"
+
+
+def analyze_composite_context(snapshot: Snapshot, cfg=None) -> CompositeContextContext:
+    """Componenta Composite Context - pura, cauzala. Structura 15D/90D + relatia pretului +
+    confluente/conflicte intre timeframe-uri, cu context supportive/neutral/contradicting
+    derivat DOAR prin reguli transparente (expuse in `reasons`)."""
+    c = {**COMPOSITE_CONTEXT_DEFAULTS, **(cfg or {})}
+    n = len(snapshot)
+    tick = snapshot.tick_size or 0.25
+    price = float(snapshot.close[-1]) if n else 0.0
+    now = snapshot.now_epoch
+
+    comps_raw = [x for x in snapshot.composite_levels if int(x.available_from) <= now]
+    refs_raw = [x for x in snapshot.reference_levels if int(x.available_from) <= now]
+    if n == 0 or not comps_raw:
+        return CompositeContextContext(False, price, [], [], [], False, "INSUFFICIENT",
+                                       "NEUTRAL", [])
+
+    # profile composite (grupate pe span)
+    by_span = {}
+    for r in comps_raw:
+        by_span.setdefault(r.session, []).append(r)
+    composites = []
+    for span in sorted(by_span):
+        d, hvn, lvn = {}, [], []
+        for r in by_span[span]:
+            if r.kind in ("poc", "vah", "val", "high", "low"):
+                d[r.kind] = float(r.price)
+            elif r.kind == "hvn":
+                hvn.append(float(r.price))
+            elif r.kind == "lvn":
+                lvn.append(float(r.price))
+        poc, vah, val = d.get("poc", 0.0), d.get("vah", 0.0), d.get("val", 0.0)
+        loc = _va_location(price, vah, val)
+        poc_dist = (price - poc) / tick if poc > 0 else 0.0
+        composites.append(CompositeProfileRef(span, poc, vah, val, d.get("high", 0.0),
+                                              d.get("low", 0.0), sorted(hvn), sorted(lvn),
+                                              loc, poc_dist))
+
+    # locatiile pe timeframe-uri: prev sesiune (din reference_levels) + composite
+    timeframe_locations, reasons = [], []
+    prev = {r.kind: float(r.price) for r in refs_raw if r.session == "prev"
+            and r.kind in ("vah", "val")}
+    if "vah" in prev and "val" in prev:
+        loc = _va_location(price, prev["vah"], prev["val"])
+        timeframe_locations.append(("prev", loc)); reasons.append(f"prev: {loc}")
+    for cp in composites:
+        timeframe_locations.append((cp.span, cp.location))
+        reasons.append(f"{cp.span}: {cp.location}")
+
+    # regula TRANSPARENTA de acord/context
+    locs = [loc for _, loc in timeframe_locations if loc != "UNKNOWN"]
+    locset = set(locs)
+    if len(locs) < 2:
+        agreement, context = "INSUFFICIENT", "NEUTRAL"
+    elif locset == {"ABOVE_VALUE"}:
+        agreement, context = "CONFLUENT_ABOVE", "SUPPORTIVE"
+    elif locset == {"BELOW_VALUE"}:
+        agreement, context = "CONFLUENT_BELOW", "SUPPORTIVE"
+    elif locset == {"INSIDE_VALUE"}:
+        agreement, context = "CONFLUENT_INSIDE", "NEUTRAL"
+    elif "ABOVE_VALUE" in locset and "BELOW_VALUE" in locset:
+        agreement, context = "MIXED", "CONTRADICTING"
+    else:
+        agreement, context = "PARTIAL", "NEUTRAL"
+    reasons.append(f"agreement={agreement} -> {context}")
+
+    # confluenta multi-timeframe: nivele (prev + composite) grupate langa pretul curent
+    last = n - 1
+    lo_scan = max(0, last - 20)
+    bar_range = float(np.median((snapshot.high - snapshot.low)[lo_scan:last + 1]))
+    band = max(c["cluster_ratio"] * bar_range, tick)
+    near = [x for x in (refs_raw + comps_raw) if abs(x.price - price) <= band]
+    confluence_levels = sorted(
+        [LevelRef(x.session, x.kind, float(x.price), (price - x.price) / tick) for x in near],
+        key=lambda z: abs(z.distance_ticks))
+    has_confluence = len(confluence_levels) >= 2
+    if has_confluence:
+        tags = ", ".join(f"{z.session}_{z.kind}@{z.price:.0f}" for z in confluence_levels[:4])
+        reasons.append(f"confluence zone near price: {tags}")
+
+    return CompositeContextContext(True, price, composites, timeframe_locations,
+                                   confluence_levels, has_confluence, agreement, context, reasons)
+
+
 # ------------------------------------------------------------------ ContextEngine
 class ContextEngine:
     """
@@ -1290,6 +1423,7 @@ class ContextEngine:
             "acceptance_rejection": analyze_acceptance_rejection(snapshot, self.config.get("level_interaction")),
             "tape_speed": analyze_tape_speed(snapshot, self.config.get("tape_speed")),
             "session_context": analyze_session_context(snapshot, self.config.get("session_context")),
+            "composite_context": analyze_composite_context(snapshot, self.config.get("composite_context")),
         }
         if n == 0:
             return ContextResult(now_epoch=int(snapshot.now_epoch), n_bars=0,

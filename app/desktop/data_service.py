@@ -656,3 +656,52 @@ def build_reference_levels(filename, mode="session", va_percent=0.70, row_size=2
             for p in info.get("lvn", []):
                 out.append(ReferenceLevel(name.lower(), "lvn", float(p), avail))
     return out
+
+
+def build_composite_levels(filename, spans=(15, 90), va_percent=0.70, row_size=2.0):
+    """
+    Niveluri COMPOSITE pe termen lung (15D/90D) ca list[ReferenceLevel] (core), pentru P3.
+    Aditiv: reuseste _last_n_days_block + load_many, nu modifica nimic existent.
+
+    Composite = ISTORIE: N zile care se termina IERI (exclud ziua curenta) -> pur cauzal,
+    available_from=0. POC/VAH/VAL + HVN/LVN (noduri P1a) + high/low pe fereastra composite.
+    Eticheta span = "15D"/"90D" (session in ReferenceLevel).
+    """
+    from core import ReferenceLevel
+    out = []
+    date = _date_of(filename)
+    if not date:
+        return out
+    available = _available_by_date()
+    d = datetime.date(int(date[:4]), int(date[4:6]), int(date[6:8]))
+    prev_date = None
+    for back in range(1, 8):
+        pdate = (d - datetime.timedelta(days=back)).strftime("%Y%m%d")
+        if pdate in available:
+            prev_date = pdate
+            break
+    if prev_date is None:
+        return out
+
+    for n in spans:
+        block = _last_n_days_block(prev_date, available, n)   # N zile pana IERI inclusiv
+        if not block:
+            continue
+        tk = load_many(block)
+        if tk.df.empty:
+            continue
+        vp = VolumeProfileEngine(tick_size=row_size)
+        vp.add_ticks_bulk(tk.price_volume())
+        vpr = vp.result(va_percent=va_percent)
+        hvn_nodes, lvn_nodes = vp.compute_nodes(min_prominence_ratio=0.4, lvn_mode="full")
+        prices = tk.df["price"]
+        span = f"{n}D"
+        for kind, val in (("poc", vpr.poc), ("vah", vpr.vah), ("val", vpr.val),
+                          ("high", float(prices.max())), ("low", float(prices.min()))):
+            if val is not None:
+                out.append(ReferenceLevel(span, kind, float(val), 0))
+        for nd in hvn_nodes[:6]:
+            out.append(ReferenceLevel(span, "hvn", float(nd.price), 0))
+        for nd in lvn_nodes[:6]:
+            out.append(ReferenceLevel(span, "lvn", float(nd.price), 0))
+    return out

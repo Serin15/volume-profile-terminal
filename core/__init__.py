@@ -22,7 +22,10 @@ from core.context_engine import (ContextEngine, ContextResult, Snapshot,
                                  TAPE_SPEED_STATES, TAPE_SPEED_DEFAULTS,
                                  ReferenceLevel, LevelRef, SessionProfileRef,
                                  SessionContextContext, analyze_session_context,
-                                 SESSION_CONTEXT_DEFAULTS)
+                                 SESSION_CONTEXT_DEFAULTS,
+                                 CompositeProfileRef, CompositeContextContext,
+                                 analyze_composite_context, COMPOSITE_CONTEXT_STATES,
+                                 COMPOSITE_CONTEXT_DEFAULTS)
 
 __all__ = [
     "VolumeProfileEngine",
@@ -75,4 +78,9 @@ __all__ = [
     "SessionContextContext",
     "analyze_session_context",
     "SESSION_CONTEXT_DEFAULTS",
+    "CompositeProfileRef",
+    "CompositeContextContext",
+    "analyze_composite_context",
+    "COMPOSITE_CONTEXT_STATES",
+    "COMPOSITE_CONTEXT_DEFAULTS",
 ]
