@@ -498,6 +498,110 @@ def developing_levels(footprint, t, row_size, va_percent):
     return dp, dvah, dval
 
 
+def _vp_split_from_ticks(df, row_size, va_percent, lvn_full_profile):
+    """VP structurat (bin-uri split buy/sell + POC/VA/HVN/LVN) dintr-un DataFrame de
+    tick-uri [ts,price,size,side]. Aceeasi logica de bin-uri ca load_day (o singura
+    definitie a profilului) - reutilizata de profile per-perioada (Profile Only)."""
+    if df is None or df.empty:
+        return None
+    prices = df["price"].to_numpy()
+    sizes = df["size"].to_numpy()
+    sides = df["side"].astype(str).to_numpy()
+    vp = VolumeProfileEngine(tick_size=row_size)
+    vp.add_ticks_bulk(zip(prices.tolist(), sizes.tolist()))
+    vpr = vp.result(va_percent=va_percent)
+    if not vpr.profile:
+        return None
+    de = DeltaEngine(tick_size=row_size)
+    de.add_ticks_bulk(zip(prices.tolist(), sizes.tolist(), sides.tolist()))
+    der = de.result()
+    bin_prices = sorted(vpr.profile.keys())
+    bin_buy = np.empty(len(bin_prices)); bin_sell = np.empty(len(bin_prices))
+    for i, p in enumerate(bin_prices):
+        total = vpr.profile[p]
+        b = der.buy_volume_per_level.get(p, 0.0)
+        s = der.sell_volume_per_level.get(p, 0.0)
+        bs = b + s
+        if bs > 0:
+            bin_buy[i] = total * b / bs
+            bin_sell[i] = total * s / bs
+        else:
+            bin_buy[i] = bin_sell[i] = total / 2.0
+    node_hvn, node_lvn = vp.compute_hvn_lvn_peaks(
+        min_prominence_ratio=0.4, lvn_within_hvn=not lvn_full_profile)
+    hvn, lvn = _top_nodes(node_hvn, node_lvn, vpr.profile,
+                          max_lvn=6 if lvn_full_profile else 3)
+    return dict(bin_price=np.array(bin_prices, dtype=float), bin_buy=bin_buy, bin_sell=bin_sell,
+                poc=vpr.poc or 0.0, vah=vpr.vah or 0.0, val=vpr.val or 0.0,
+                hvn=hvn, lvn=lvn, total=vpr.total_volume)
+
+
+def period_profiles(filename, mode="session", span="day", unit="Zi", va_percent=0.70,
+                    row_size=2.0, sessions=None, lvn_full_profile=False):
+    """VP SEPARAT per PERIOADA (zi sau sesiune) de-a lungul span-ului -> modul 'Profile Only'.
+
+    Fiecare intrare e un profil pozitionat pe axa timpului: {label, x0, x1 (epoci UTC),
+    bin_price, bin_buy, bin_sell, poc, vah, val, hvn, lvn, total}.
+
+    unit: 'Zi' (un profil per zi din span) sau 'Asia'/'Londra'/'NY' (acea sesiune per zi)
+          sau 'Toate' (toate cele trei sesiuni per zi). Ferestrele de sesiune sunt ancorate
+          pe fus orar (zoneinfo) EXACT ca session_profiles -> auto vara/iarna.
+    span: reutilizeaza mecanismul existent ('day', 'week', 'Nd'). Aditiv: nu atinge load_day.
+    """
+    available = _available_by_date()
+    date = _date_of(filename)
+    if span == "week":
+        files = _contiguous_block(date, available) if date else [filename]
+    elif isinstance(span, str) and span.endswith("d") and span[:-1].isdigit():
+        files = (_last_n_days_block(date, available, int(span[:-1])) if date else []) or [filename]
+    else:
+        files = [filename]
+
+    sessions = sessions or SESSION_DEFS["real"]
+    unit = unit or "Zi"
+    want = None if unit in ("Toate", "Toate sesiunile") else unit
+    out = []
+    for f in files:
+        try:
+            tk, _ = _get_ticks(f, mode, available)
+        except Exception:
+            continue
+        df = tk.df
+        if df.empty:
+            continue
+        tsec = (df["ts"].astype("int64") // 10**9).to_numpy()
+        if unit == "Zi":
+            info = _vp_split_from_ticks(df, row_size, va_percent, lvn_full_profile)
+            if info:
+                fd = _date_of(f) or ""
+                info.update(label=f"{fd[4:6]}-{fd[6:8]}" if len(fd) == 8 else fd,
+                            x0=float(tsec.min()), x1=float(tsec.max()))
+                out.append(info)
+            continue
+        fdate = _date_of(f)
+        if not fdate:
+            continue
+        y, mo, dd = int(fdate[:4]), int(fdate[4:6]), int(fdate[6:8])
+        for name, tz, (sh, sm), (eh, em) in sessions:
+            if want is not None and name != want:
+                continue
+            z = ZoneInfo(tz)
+            start = datetime.datetime(y, mo, dd, sh, sm, tzinfo=z).timestamp()
+            end = datetime.datetime(y, mo, dd, eh, em, tzinfo=z).timestamp()
+            if end <= start:
+                end += 86400.0
+            mask = (tsec >= start) & (tsec < end)
+            if not mask.any():
+                continue
+            info = _vp_split_from_ticks(df[mask], row_size, va_percent, lvn_full_profile)
+            if info:
+                info.update(label=f"{fdate[4:6]}-{fdate[6:8]} {name}",
+                            x0=float(start), x1=float(end))
+                out.append(info)
+    out.sort(key=lambda d: d["x0"])
+    return out
+
+
 def load_day(filename, va_percent=0.70, interval="5min", row_size=2.0,
              mode="session", span="day",
              big_trade_min=BIG_TRADE_MIN, abs_params=None, exh_params=None,

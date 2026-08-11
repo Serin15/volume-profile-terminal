@@ -614,3 +614,128 @@ class GridStatsItem(pg.GraphicsObject):
 
     def boundingRect(self):
         return QtCore.QRectF(self._bounds)
+
+
+class PeriodProfilesItem(pg.GraphicsObject):
+    """
+    Mod "Profile Only" (stil DeepCharts): mai multe Volume Profile-uri, fiecare pozitionat
+    pe axa TIMPULUI la perioada lui ([x0, x1] epoci UTC), histograma orizontala split
+    buy (verde) / sell (mov), POC accentuat. Fara lumanari. Culling la viewport ca
+    FootprintItem (deseneaza doar profilele + nivelurile vizibile).
+
+    Datele vin din data_service.period_profiles(): list de dict cu
+    {label, x0, x1, bin_price, bin_buy, bin_sell, poc, ...}.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._profiles = []
+        self._row_size = 2.0
+        self._vb = None
+        self._bounds = QtCore.QRectF()
+        buy = QtGui.QColor(theme.BUY); buy.setAlpha(175)
+        sell = QtGui.QColor(theme.SELL); sell.setAlpha(175)
+        self._buy_brush = pg.mkBrush(buy)
+        self._sell_brush = pg.mkBrush(sell)
+        self._no_pen = pg.mkPen(None)
+        self._no_brush = QtGui.QBrush(QtCore.Qt.NoBrush)
+        self._poc_pen = QtGui.QPen(QtGui.QColor(theme.POC))
+        self._poc_pen.setWidthF(1.6); self._poc_pen.setCosmetic(True)
+        self._div_pen = QtGui.QPen(QtGui.QColor(theme.BORDER)); self._div_pen.setCosmetic(True)
+        self._lbl_pen = pg.mkPen(theme.TEXT_DIM)
+
+    def attach(self, viewbox):
+        self._vb = viewbox
+        viewbox.sigRangeChanged.connect(lambda *a: self.update())
+
+    def set_data(self, profiles, row_size):
+        self._profiles = profiles or []
+        self._row_size = row_size
+        xmin = xmax = pmin = pmax = None
+        for pr in self._profiles:
+            bp = pr.get("bin_price")
+            if bp is None or not len(bp):
+                pr["_max"] = 1.0; continue
+            tot = pr["bin_buy"] + pr["bin_sell"]
+            pr["_max"] = float(tot.max()) if len(tot) and tot.max() > 0 else 1.0
+            x0, x1 = pr["x0"], pr["x1"]
+            lo, hi = float(bp.min()), float(bp.max())
+            xmin = x0 if xmin is None else min(xmin, x0)
+            xmax = x1 if xmax is None else max(xmax, x1)
+            pmin = lo if pmin is None else min(pmin, lo)
+            pmax = hi if pmax is None else max(pmax, hi)
+        if xmin is not None:
+            h = row_size
+            self._bounds = QtCore.QRectF(xmin, pmin - h, (xmax - xmin), (pmax - pmin) + 2 * h)
+        else:
+            self._bounds = QtCore.QRectF()
+        self.prepareGeometryChange()
+        self.update()
+
+    def data_bounds(self):
+        """(xmin, xmax, pmin, pmax) al tuturor profilelor (pt auto-range) sau None."""
+        if self._bounds.isNull():
+            return None
+        b = self._bounds
+        return b.left(), b.right(), b.top(), b.bottom()
+
+    def paint(self, p, *args):
+        if self._vb is None or not self._profiles:
+            return
+        (xmin, xmax), (ymin, ymax) = self._vb.viewRange()
+        h = self._row_size * 0.92
+        for pr in self._profiles:
+            x0, x1 = pr["x0"], pr["x1"]
+            if x1 < xmin or x0 > xmax:
+                continue
+            bp = pr.get("bin_price")
+            if bp is None or not len(bp):
+                continue
+            bb, bs = pr["bin_buy"], pr["bin_sell"]
+            slot = (x1 - x0) * 0.9
+            inv = 1.0 / pr.get("_max", 1.0)
+            poc = pr.get("poc")
+            # divider faint la inceputul perioadei (separa profilele, ca in poza)
+            p.setPen(self._div_pen)
+            p.drawLine(QtCore.QPointF(x0, ymin), QtCore.QPointF(x0, ymax))
+            p.setPen(self._no_pen)
+            for i in range(len(bp)):
+                price = float(bp[i])
+                if price < ymin - h or price > ymax + h:
+                    continue
+                buy = float(bb[i]); sell = float(bs[i]); total = buy + sell
+                if total <= 0:
+                    continue
+                w = total * inv * slot
+                wb = (buy / total) * w
+                y = price - h / 2.0
+                if wb > 0:
+                    p.setBrush(self._buy_brush); p.drawRect(QtCore.QRectF(x0, y, wb, h))
+                if w - wb > 0:
+                    p.setBrush(self._sell_brush); p.drawRect(QtCore.QRectF(x0 + wb, y, w - wb, h))
+                if poc is not None and abs(price - poc) <= self._row_size / 2.0:
+                    p.setPen(self._poc_pen); p.setBrush(self._no_brush)
+                    p.drawRect(QtCore.QRectF(x0, y, max(w, slot * 0.06), h))
+                    p.setPen(self._no_pen)
+        # Etichete (data / sesiune) sus, doar cand perioada e destul de lata pe ecran
+        try:
+            xscale, _ = self._vb.viewPixelSize()
+        except Exception:
+            return
+        if xscale <= 0:
+            return
+        tr = p.transform(); p.save(); p.resetTransform()
+        font = QtGui.QFont(); font.setPixelSize(9); p.setFont(font); p.setPen(self._lbl_pen)
+        for pr in self._profiles:
+            x0, x1 = pr["x0"], pr["x1"]
+            if x1 < xmin or x0 > xmax:
+                continue
+            if (x1 - x0) / xscale < 34:
+                continue
+            dev = tr.map(QtCore.QPointF((x0 + x1) / 2.0, ymax))
+            p.drawText(QtCore.QRectF(dev.x() - 60, dev.y() + 2, 120, 12),
+                       QtCore.Qt.AlignCenter, str(pr.get("label", "")))
+        p.restore()
+
+    def boundingRect(self):
+        return QtCore.QRectF(self._bounds)

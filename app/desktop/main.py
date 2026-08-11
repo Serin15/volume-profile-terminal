@@ -26,9 +26,10 @@ from app.desktop.data_service import (load_day, INTERVAL_SECONDS, resolve_ticks,
                                       session_profiles, SESSION_DEFS, TICK_SIZE,
                                       BIG_TRADE_MIN, ABS_MIN_VOL, ABS_DOM, ABS_REJECT,
                                       EXH_WINDOW, EXH_VOL_MULT, EXH_DELTA_FRAC,
-                                      build_reference_levels, build_composite_levels)
+                                      build_reference_levels, build_composite_levels,
+                                      period_profiles)
 from app.desktop.charts import (CandlestickItem, ProfileOverlayItem, FootprintItem,
-                                GridStatsItem, StatsAxis)
+                                GridStatsItem, StatsAxis, PeriodProfilesItem)
 from app.desktop.replay import Replay
 from app.desktop.drawings import DrawingManager
 
@@ -330,7 +331,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cbo_compare.addItem("— fara —", userData=None)
         for f in discover_files():
             self.cbo_compare.addItem(nice_label(f), userData=f)
-        self.cbo_type = QtWidgets.QComboBox(); self.cbo_type.addItems(["Profil", "Footprint"])
+        self.cbo_type = QtWidgets.QComboBox()
+        self.cbo_type.addItems(["Profil", "Footprint", "Profile Only"])
+        # Profile Only: perioada fiecarui profil (vizibil doar in acest mod)
+        self.cbo_po_unit = QtWidgets.QComboBox()
+        self.cbo_po_unit.addItems(["Zi", "Asia", "Londra", "NY", "Toate sesiunile"])
+        self.cbo_po_unit.setVisible(False)
+        self.cbo_po_unit.setToolTip(
+            "Profile Only: cate un Volume Profile per perioada, de-a lungul timpului.\n"
+            "Zi = un profil/zi; Asia/Londra/NY = doar acea sesiune; Toate = 3 profile/zi.\n"
+            "Span-ul (1 zi / saptamana / 15-90 zile) vine din setarea de perioada VP.")
         # Vederi (preset-uri de straturi) - un click = un set curat, gandit
         self.cbo_view = QtWidgets.QComboBox()
         self.cbo_view.addItems(["Vedere ▾", "Curat", "Order Flow", "NY Open", "Tot"])
@@ -410,7 +420,8 @@ class MainWindow(QtWidgets.QMainWindow):
         tv.setContentsMargins(0, 0, 0, 0); tv.setSpacing(1)
         tl = QtWidgets.QLabel("Tip"); tl.setObjectName("FieldLabel"); tv.addWidget(tl)
         trow = QtWidgets.QHBoxLayout(); trow.setContentsMargins(0, 0, 0, 0); trow.setSpacing(4)
-        trow.addWidget(self.cbo_type); trow.addWidget(self.btn_fp_settings)
+        trow.addWidget(self.cbo_type); trow.addWidget(self.cbo_po_unit)
+        trow.addWidget(self.btn_fp_settings)
         tv.addLayout(trow); lay.addWidget(tipbox)
         lay.addWidget(self._field("Interval", self.cbo_interval))
         lay.addWidget(self._field("Fus", self.cbo_tz))
@@ -425,7 +436,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cbo_interval.currentIndexChanged.connect(self._reload_keep)     # pastreaza pozitia+zoom
         self.cbo_va.currentIndexChanged.connect(self._reload_keep)
         self.cbo_res.currentIndexChanged.connect(self._reload_keep)
-        self.cbo_type.currentIndexChanged.connect(self._rerender_current)    # Profil/Footprint = doar vizual
+        self.cbo_type.currentIndexChanged.connect(self._on_type_changed)     # Profil/Footprint/Profile Only
+        self.cbo_po_unit.currentIndexChanged.connect(self._render_profile_only)
         self.cbo_view.currentIndexChanged.connect(self._on_view_changed)     # preset-uri de straturi
         self.chk_nodes.stateChanged.connect(self._rerender_current)
         self.chk_vp.stateChanged.connect(self._rerender_current)
@@ -904,6 +916,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.footprint_item.setZValue(-4)
         self.price.addItem(self.footprint_item)
         self.footprint_item.attach(self.price.getViewBox())
+
+        # Profile Only - mai multe VP-uri de-a lungul timpului (mod fara lumanari)
+        self.period_profiles_item = PeriodProfilesItem()
+        self.period_profiles_item.setZValue(-4)
+        self.period_profiles_item.setVisible(False)
+        self.price.addItem(self.period_profiles_item)
+        self.period_profiles_item.attach(self.price.getViewBox())
 
         # VWAP developing
         _vwap_c = QtGui.QColor(theme.VWAP); _vwap_c.setAlpha(200)   # context: putin mai stins ca semnalele sa iasa in fata
@@ -1498,7 +1517,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_session_profiles()  # profile separate Asia/Londra/NY (VAH/VAL + LVN)
         self._setup_custom_region()   # arata/ascunde zona Custom range
 
-        if self.btn_replay.isChecked():
+        if self.cbo_type.currentText() == "Profile Only":
+            self._data = d
+            self._set_standard_layers_visible(False)
+            self._render_profile_only()
+        elif self.btn_replay.isChecked():
             self._enter_replay()
         else:
             self._render(d, set_range=True)
@@ -1508,6 +1531,101 @@ class MainWindow(QtWidgets.QMainWindow):
         (toggle HVN/LVN, VP, Profil/Footprint -> nu reseta pozitia/zoom-ul)."""
         if self._data is not None:
             self._render(self._data, set_range=False, follow=False)
+
+    # ---------- Profile Only (VP per perioada de-a lungul timpului) ----------
+    def _on_type_changed(self, *a):
+        """Profil / Footprint = doar vizual (rerender). Profile Only = mod separat."""
+        if self.cbo_type.currentText() == "Profile Only":
+            self.cbo_po_unit.setVisible(True)
+            self._set_standard_layers_visible(False)
+            self._render_profile_only()
+        else:
+            self.cbo_po_unit.setVisible(False)
+            self.period_profiles_item.setVisible(False)
+            self._set_standard_layers_visible(True)   # reconstruieste chart-ul standard
+
+    def _render_profile_only(self, *a):
+        """Calculeaza + deseneaza cate un Volume Profile per perioada (zi/sesiune) de-a
+        lungul timpului. Reutilizeaza data_service.period_profiles (span-ul + fusul curent)."""
+        if self.cbo_type.currentText() != "Profile Only":
+            return
+        fname = self.cbo_day.currentData()
+        if not fname:
+            return
+        unit = self.cbo_po_unit.currentText()
+        mode = getattr(self, "_mode", "session")
+        span = getattr(self, "_span", "day")
+        va, row = self.cbo_va.currentText(), self.cbo_res.currentText()
+        key = (fname, mode, span, unit, va, row, self._sess_mode, self._lvn_full)
+        cache = getattr(self, "_po_cache", None)
+        if cache is None:
+            cache = self._po_cache = {}
+        if key in cache:
+            profs = cache[key]
+        else:
+            self.setCursor(QtCore.Qt.WaitCursor)
+            try:
+                profs = period_profiles(
+                    fname, mode=mode, span=span, unit=unit,
+                    va_percent=float(va) / 100.0, row_size=float(row),
+                    sessions=self._active_sessions(), lvn_full_profile=self._lvn_full)
+            except Exception:
+                profs = []
+            finally:
+                self.unsetCursor()
+            cache[key] = profs
+        self.period_profiles_item.set_data(profs, float(row))
+        self.period_profiles_item.setVisible(True)
+        self.lbl_warn.setText("" if profs else "⚠ niciun profil pentru selectia curenta")
+        b = self.period_profiles_item.data_bounds()
+        if b:
+            x0, x1, p0, p1 = b
+            self._prog_range = True
+            padx = (x1 - x0) * 0.03 or 60.0
+            pady = (p1 - p0) * 0.05 or 3.0
+            self.price.setXRange(x0 - padx, x1 + padx, padding=0)
+            self.price.setYRange(p0 - pady, p1 + pady, padding=0)
+            self._prog_range = False
+
+    def _set_standard_layers_visible(self, show):
+        """Intra/iese din Profile Only: la revenire (show=True) reconstruieste chart-ul
+        standard prin caile normale; la intrare (show=False) ascunde tot ce nu tine de
+        profilele per-perioada + goleste panourile de jos (CVD/grid)."""
+        if show:
+            self._rerender_current()             # candles/footprint/profile/markere/dev/noduri/range
+            self.vwap_curve.setVisible(self.chk_vwap.isChecked())
+            for ln in list(self.price_lines.values()) + [self.last_line]:
+                ln.setVisible(True)
+            self.va_band.setVisible(True)
+            self._update_prior_visibility()
+            self._update_session_shading()
+            self._render_session_lines()
+            self._on_compare_changed()
+            return
+        hide_items = [self.candles, self.footprint_item, self.profile_item, self.vwap_curve,
+                      self.cmp_profile, self.va_band, self.prior_va_band, self.dev_poc_curve,
+                      self.dev_vah_curve, self.dev_val_curve, self.big_scatter,
+                      self.abs_scatter, self.exh_scatter]
+        for it in hide_items:
+            try:
+                it.setVisible(False)
+            except Exception:
+                pass
+        hide_lines = (list(self.node_lines) + list(self._sess_lines)
+                      + list(self.cmp_lines.values()) + list(self.price_lines.values())
+                      + list(self.prior_lines.values()) + [self.last_line]
+                      + list(self._session_bands))
+        for ln in hide_lines:
+            try:
+                ln.setVisible(False)
+            except Exception:
+                pass
+        # goleste panourile de jos (altfel arata ultima zi standard)
+        self.cvd_pos.setData([], []); self.cvd_neg.setData([], []); self.cvd_line.setData([], [])
+        try:
+            self.grid_stats.set_data([], [], [], 60)
+        except Exception:
+            pass
 
     def _set_nodes(self, hvn, lvn):
         """(Re)deseneaza liniile HVN/LVN. Reutilizat de _render si de modul Visible."""
@@ -1557,6 +1675,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_vp_scope(self, *args):
         """VISIBLE: profil pe fereastra vizibila (se schimba la zoom/pan)."""
+        if self.cbo_type.currentText() == "Profile Only":
+            return
         if self._vp_scope != "visible" or self._data is None or not len(self._data.t):
             return
         (xmin, xmax), _ = self.price.getViewBox().viewRange()
@@ -1588,6 +1708,8 @@ class MainWindow(QtWidgets.QMainWindow):
         zoom in (Footprint) = celule footprint (cu delta/Bid×Ask dupa marimea celulei).
         Cand Auto e off, checkbox-urile decid (comportament manual).
         """
+        if self.cbo_type.currentText() == "Profile Only":
+            return                  # modul Profile Only isi gestioneaza singur vizibilitatea
         self._position_bar_info()   # panoul Bar Info ramane in coltul stanga-sus la zoom/pan
         is_fp = self.cbo_type.currentText() == "Footprint"
         if not self.chk_auto.isChecked() or self._data is None or not len(self._data.t):
