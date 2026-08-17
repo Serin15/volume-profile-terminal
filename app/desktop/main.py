@@ -602,32 +602,34 @@ class MainWindow(QtWidgets.QMainWindow):
         bar = QtWidgets.QWidget(); bar.setObjectName("LayerBar")
         lay = QtWidgets.QHBoxLayout(bar)
         lay.setContentsMargins(10, 4, 10, 4); lay.setSpacing(8)
-        vlbl = QtWidgets.QLabel("VEDERE"); vlbl.setObjectName("FieldLabel")
-        lay.addWidget(vlbl); lay.addWidget(self.cbo_view)
+
+        def grp(text):   # eticheta mica de SECTIUNE (grupare semantica, nu "zid de bife")
+            l = QtWidgets.QLabel(text); l.setObjectName("FieldLabel"); return l
+
+        lay.addWidget(grp("VEDERE")); lay.addWidget(self.cbo_view)
         lay.addWidget(self._sep())
-        lbl = QtWidgets.QLabel("STRATURI"); lbl.setObjectName("FieldLabel")
-        lay.addWidget(lbl)
-        lay.addWidget(self.chk_auto)                                   # Smart Layers
+        lay.addWidget(grp("SMART")); lay.addWidget(self.chk_auto)         # Smart Layers
         lay.addWidget(self._sep())
-        lay.addWidget(self.chk_vp); lay.addWidget(self.btn_vp_settings)   # Volume Profile
+        lay.addWidget(grp("PROFIL"))                                      # Volume Profile
+        lay.addWidget(self.chk_vp); lay.addWidget(self.btn_vp_settings)
         lay.addWidget(self.chk_nodes)
         lay.addWidget(self.chk_vwap)
         lay.addWidget(self.chk_dev)
         lay.addWidget(self._sep())
-        lay.addWidget(self.chk_big); lay.addWidget(self.btn_bt_settings)  # Order flow
+        lay.addWidget(grp("ORDER FLOW"))                                  # Order flow
+        lay.addWidget(self.chk_big); lay.addWidget(self.btn_bt_settings)
         lay.addWidget(self.chk_abs); lay.addWidget(self.btn_abs_settings)
         lay.addWidget(self.chk_exh); lay.addWidget(self.btn_exh_settings)
         lay.addWidget(self.chk_grid)
         lay.addWidget(self.chk_cvd)
-        lay.addWidget(self.chk_ctx)                                    # Execution Context (P6)
+        lay.addWidget(self.chk_ctx)                                       # Execution Context (P6)
         lay.addWidget(self._sep())
-        lay.addWidget(self.chk_prior)                                  # Context / sesiune
+        lay.addWidget(grp("SESIUNE"))                                     # Context / sesiune
+        lay.addWidget(self.chk_prior)
         lay.addWidget(self.chk_session)
         lay.addWidget(self.chk_sess); lay.addWidget(self.btn_sess_settings)
         lay.addStretch(1)
-        # Session Browser + Compare (dreapta)
-        cl = QtWidgets.QLabel("Compară:"); cl.setObjectName("FieldLabel")
-        lay.addWidget(cl); lay.addWidget(self.cbo_compare)
+        lay.addWidget(grp("COMPARĂ")); lay.addWidget(self.cbo_compare)    # Session Browser + Compare
         return bar
 
     def _open_fp_settings(self):

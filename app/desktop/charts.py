@@ -526,7 +526,8 @@ class GridStatsItem(pg.GraphicsObject):
         self._BUCKETS = 20
         self._vol_br, self._pos_br, self._neg_br = [], [], []
         for i in range(self._BUCKETS):
-            a = int(35 + 185 * (i / (self._BUCKETS - 1)))
+            # heatmap mai discret (max ~144, nu 220) -> panoul de jos nu mai concureaza cu lumanarile
+            a = int(26 + 118 * (i / (self._BUCKETS - 1)))
             cv = QtGui.QColor(120, 135, 162); cv.setAlpha(a); self._vol_br.append(pg.mkBrush(cv))
             cp = QtGui.QColor(theme.BUY); cp.setAlpha(a); self._pos_br.append(pg.mkBrush(cp))
             cn = QtGui.QColor(theme.SELL); cn.setAlpha(a); self._neg_br.append(pg.mkBrush(cn))
