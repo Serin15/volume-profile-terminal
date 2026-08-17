@@ -22,9 +22,11 @@ SELL = "#b06bf7"
 # Value Area mai luminoasa si bara POC accentuata -> curat, nu "fierastrau" de culori.
 VP_BASE = (96, 110, 138)   # slate-albastru discret (nivelurile din afara VA)
 VP_VA = (140, 170, 214)    # steel-blue mai luminos (nivelurile din Value Area)
-POC = "#ff2d7e"         # magenta (linia POC, ca la DeepCharts)
-VWAP = "#ff9d2e"        # portocaliu (curba VWAP)
-VA_LINE = "#ff9d2e"     # marginile Value Area (portocaliu)
+POC = "#ff2d7e"         # magenta (linia POC, ca la DeepCharts) - PRIMAR, cel mai vizibil
+VWAP = "#ff9d2e"        # portocaliu (curba VWAP) - SECUNDAR
+VA_LINE = "#8c9bb5"     # marginile Value Area: slate discret (SECUNDAR), DISTINCT de VWAP portocaliu
+# Fundal comun pentru pastilele de pe axa (stil pro: pastila inchisa + text colorat, nu cutii pline)
+PILL_BG = (18, 20, 26, 235)
 # Cutie Value Area: gri-albastrui NEUTRU si discret (nu portocaliu) ca sa nu se bata
 # cu VWAP-ul si sa nu "inunde" fundalul; zona ramane marcata de liniile VAH/VAL punctate.
 VA_BAND = (124, 136, 162, 20)  # slate rece, foarte transparent (stil ATAS)

@@ -901,8 +901,8 @@ class MainWindow(QtWidgets.QMainWindow):
             ln = pg.InfiniteLine(angle=0, movable=False,
                                  pen=pg.mkPen(theme.CMP, width=wdt, style=QtCore.Qt.DashLine),
                                  label=lbl + " {value:.2f}",
-                                 labelOpts={"position": 0.90, "color": "#04121e",
-                                            "fill": pg.mkColor(theme.CMP), "movable": False})
+                                 labelOpts={"position": 0.90, "color": theme.CMP,
+                                            "fill": theme.PILL_BG, "movable": False})
             ln.setZValue(-2); ln.setVisible(False)
             self.price.addItem(ln); self.cmp_lines[key] = ln
         self._cmp_data = None
@@ -982,8 +982,9 @@ class MainWindow(QtWidgets.QMainWindow):
                       pen=pg.mkPen(color, width=width, style=dash))
             if label:
                 kw["label"] = label
-                kw["labelOpts"] = {"position": position, "color": "#0a0a0a",
-                                   "fill": pg.mkColor(color), "movable": False}
+                # pastila PRO: fundal inchis + text in culoarea nivelului (nu cutie plina colorata)
+                kw["labelOpts"] = {"position": position, "color": color,
+                                   "fill": theme.PILL_BG, "movable": False}
             ln = pg.InfiniteLine(**kw)
             self.price.addItem(ln)
             return ln
@@ -1001,8 +1002,8 @@ class MainWindow(QtWidgets.QMainWindow):
         def mk_prior(color, width, dash, label):
             ln = pg.InfiniteLine(
                 angle=0, movable=False, pen=pg.mkPen(color, width=width, style=dash),
-                label=label, labelOpts={"position": 0.04, "color": "#0a0a0a",
-                                        "fill": pg.mkColor(color), "movable": False})
+                label=label, labelOpts={"position": 0.04, "color": color,
+                                        "fill": theme.PILL_BG, "movable": False})
             ln.setZValue(-2); ln.setVisible(False)
             self.price.addItem(ln)
             return ln
@@ -2059,8 +2060,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 ln = pg.InfiniteLine(
                     pos=v, angle=0, movable=False,
                     pen=pg.mkPen(col, width=width, style=dash),
-                    label=f"{tag} {lab}", labelOpts={"position": xpos, "color": "#0a0a0a",
-                                                     "fill": col, "movable": False})
+                    label=f"{tag} {lab}", labelOpts={"position": xpos, "color": col,
+                                                     "fill": theme.PILL_BG, "movable": False})
                 ln.setZValue(-4); self.price.addItem(ln); self._sess_lines.append(ln)
             for v in info.get("lvn", []):
                 ln = pg.InfiniteLine(pos=v, angle=0, movable=False,
@@ -2192,8 +2193,26 @@ class MainWindow(QtWidgets.QMainWindow):
         c = res.components
         dim = theme.TEXT_DIM
         ov = res.overall
-        ov_col = {"SUPPORTIVE": theme.UP, "CONTRADICTING": theme.DOWN,
-                  "NEUTRAL": theme.TEXT, "INSUFFICIENT_EVIDENCE": dim}.get(ov, theme.TEXT)
+        # DIRECTIA dovezilor (din reason-ul 'evidence: X bullish / Y bearish') -> ca sa NU
+        # coloram verde/rosu orbeste. 'SUPPORTIVE' = context COERENT, NU automat 'bullish'.
+        bull = bear = 0
+        for r in res.reasons:
+            if r.startswith("evidence:"):
+                try:
+                    lhs, rhs = r.split("->")[0].replace("evidence:", "").split("/")
+                    bull = int(lhs.strip().split()[0]); bear = int(rhs.strip().split()[0])
+                except Exception:
+                    pass
+        if ov == "SUPPORTIVE":
+            up = bull >= bear
+            ov_col = theme.UP if up else theme.DOWN
+            ov_label = f"Coherent {'▲ bullish' if up else '▼ bearish'}"
+        elif ov == "CONTRADICTING":
+            ov_col, ov_label = theme.EXHAUSTION, "Conflicting ⚠"   # coral = atentie, NU mov 'sell'
+        elif ov == "NEUTRAL":
+            ov_col, ov_label = theme.TEXT, "Neutral"
+        else:
+            ov_col, ov_label = dim, "Insufficient data"
         line = f'<hr style="border:0;border-top:1px solid {theme.BORDER};margin:6px 0">'
 
         def section(title, rows):
@@ -2264,7 +2283,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return (
             f'<div style="font-family:Segoe UI,Arial,sans-serif;font-size:11px;color:{theme.TEXT}">'
             f'<div style="letter-spacing:1px;color:{dim}">EXECUTION CONTEXT</div>{line}'
-            f'<div style="font-size:14px">Overall: <b style="color:{ov_col}">{ov}</b></div>'
+            f'<div style="font-size:14px">Overall: <b style="color:{ov_col}">{ov_label}</b></div>'
             + section("FLOW", flow) + section("STRUCTURE", struct)
             + section("LEVELS", levels) + section("LOCATION", loc)
             + line + f'<div style="color:{dim}">Context:</div>'
