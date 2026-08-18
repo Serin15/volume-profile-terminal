@@ -164,13 +164,13 @@ VIEWS = {
                   big=False, abs=False, exh=False, grid=False, cvd=False,
                   prior=False, session=False, sess=False),
     "Order Flow": dict(type="Footprint", auto=True, vp=False, nodes=False, vwap=False, dev=False,
-                       big=True, abs=True, exh=True, grid=True, cvd=True,
+                       big=True, abs=True, exh=True, react=True, grid=True, cvd=True,
                        prior=False, session=False, sess=False),
     "NY Open": dict(type="Profil", auto=True, vp=True, nodes=True, vwap=False, dev=False,
                     big=True, abs=True, exh=False, grid=False, cvd=True,
                     prior=True, session=True, sess=True),
     "Tot": dict(type="Footprint", auto=True, vp=True, nodes=True, vwap=True, dev=True,
-                big=True, abs=True, exh=True, grid=True, cvd=True,
+                big=True, abs=True, exh=True, react=True, grid=True, cvd=True,
                 prior=True, session=True, sess=True),
 }
 
@@ -395,6 +395,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_abs = QtWidgets.QCheckBox("Absorption"); self.chk_abs.setChecked(False)
         self.chk_exh = QtWidgets.QCheckBox("Exhaustion"); self.chk_exh.setChecked(False)
         self.chk_exh.setToolTip("Climax de volum + delta la o extrema noua (ultimul impuls, potential reversal)")
+        self.chk_react = QtWidgets.QCheckBox("Acc/Rej"); self.chk_react.setChecked(False)
+        self.chk_react.setToolTip("Acceptance / Rejection la marginile Value Area (VAH/VAL): inele\n"
+                                  "verzi = reactie bullish (respins la VAL / acceptat peste VAH),\n"
+                                  "mov = bearish. Concept Market Profile, filtrat (nu la fiecare bara).")
         self.chk_prior = QtWidgets.QCheckBox("Ieri"); self.chk_prior.setChecked(True)
         self.chk_prior.setToolTip("Nivelurile sesiunii precedente: yPOC / yVAH / yVAL + PDH / PDL")
         self.chk_session = QtWidgets.QCheckBox("RTH"); self.chk_session.setChecked(True)
@@ -456,6 +460,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_big.stateChanged.connect(self._apply_lod)
         self.chk_abs.stateChanged.connect(self._apply_lod)
         self.chk_exh.stateChanged.connect(self._apply_lod)
+        self.chk_react.stateChanged.connect(self._apply_lod)
         self.chk_prior.stateChanged.connect(self._update_prior_visibility)
         self.chk_session.stateChanged.connect(self._update_session_shading)
         self.chk_sess.stateChanged.connect(self._on_sess_toggled)
@@ -631,6 +636,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.chk_big); lay.addWidget(self.btn_bt_settings)
         lay.addWidget(self.chk_abs); lay.addWidget(self.btn_abs_settings)
         lay.addWidget(self.chk_exh); lay.addWidget(self.btn_exh_settings)
+        lay.addWidget(self.chk_react)
         lay.addWidget(self.chk_grid)
         lay.addWidget(self.chk_cvd)
         lay.addWidget(self.chk_ctx)                                       # Execution Context (P6)
@@ -699,10 +705,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cbo_type.setCurrentText(v["type"])
         for chk, key in ((self.chk_auto, "auto"), (self.chk_vp, "vp"), (self.chk_nodes, "nodes"),
                          (self.chk_vwap, "vwap"), (self.chk_dev, "dev"), (self.chk_big, "big"),
-                         (self.chk_abs, "abs"), (self.chk_exh, "exh"), (self.chk_grid, "grid"),
-                         (self.chk_cvd, "cvd"), (self.chk_prior, "prior"),
+                         (self.chk_abs, "abs"), (self.chk_exh, "exh"), (self.chk_react, "react"),
+                         (self.chk_grid, "grid"), (self.chk_cvd, "cvd"), (self.chk_prior, "prior"),
                          (self.chk_session, "session"), (self.chk_sess, "sess")):
-            chk.setChecked(v[key])
+            chk.setChecked(v.get(key, False))
 
     def _open_data_file(self):
         """Deschide un fisier de date de ORIUNDE (CSV / Parquet) - ex. direct de pe Desktop -
@@ -976,9 +982,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.exh_scatter.sigHovered.connect(self._on_marker_hover)
         self.price.addItem(self.exh_scatter)
 
+        # Acceptance / Rejection - INELE (cerc gol colorat) la marginile Value Area (VAH/VAL);
+        # verde = reactie bullish (respins la VAL / acceptat peste VAH), mov = bearish. Hover -> tooltip.
+        self.react_scatter = pg.ScatterPlotItem(hoverable=True,
+                                                hoverPen=pg.mkPen("#ffffff", width=2), tip=_no_tip)
+        self.react_scatter.setZValue(6)
+        self.react_scatter.sigHovered.connect(self._on_marker_hover)
+        self.price.addItem(self.react_scatter)
+
         # FIX: pyqtgraph 0.14 nu mai activeaza acceptHoverEvents din hoverable=True ->
         # sigHovered nu se declansa (tooltip-ul nu aparea). Il setam explicit (persista peste setData).
-        for _sc in (self.big_scatter, self.abs_scatter, self.exh_scatter):
+        for _sc in (self.big_scatter, self.abs_scatter, self.exh_scatter, self.react_scatter):
             _sc.setAcceptHoverEvents(True)
 
         # Card de tooltip la hover peste bule/markere (ascuns implicit)
@@ -1229,6 +1243,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     "Exhaustion BOT (vanzatori epuizati)"
             txt = (f"  {title}\n  Volum {vol:.0f}   Delta {delta:+.0f}\n"
                    f"  pret {price:.2f}  ")
+        elif info[0] == "react":
+            _, rkind, lvl, price, ep = info
+            names = {"rejection_up": "Rejection UP — respins la VAL (bullish)",
+                     "rejection_down": "Rejection DOWN — respins la VAH (bearish)",
+                     "acceptance_up": "Acceptance UP — acceptat peste VAH (bullish)",
+                     "acceptance_down": "Acceptance DOWN — acceptat sub VAL (bearish)"}
+            t = datetime.datetime.fromtimestamp(
+                int(ep) + self._tz_offset, datetime.timezone.utc).strftime("%d.%m %H:%M")
+            txt = f"  {names.get(rkind, rkind)}\n  {lvl.upper()} {price:.2f}\n  {t} {self._tz_label}  "
         else:   # "abs"
             _, akind, price, buyv, sellv = info
             title = "Bullish Absorption" if akind == "bull" else "Bearish Absorption"
@@ -1622,7 +1645,7 @@ class MainWindow(QtWidgets.QMainWindow):
         hide_items = [self.candles, self.footprint_item, self.profile_item, self.vwap_curve,
                       self.cmp_profile, self.va_band, self.prior_va_band, self.dev_poc_curve,
                       self.dev_vah_curve, self.dev_val_curve, self.big_scatter,
-                      self.abs_scatter, self.exh_scatter]
+                      self.abs_scatter, self.exh_scatter, self.react_scatter]
         for it in hide_items:
             try:
                 it.setVisible(False)
@@ -1735,6 +1758,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.big_scatter.setVisible(self.chk_big.isChecked())
             self.abs_scatter.setVisible(self.chk_abs.isChecked())
             self.exh_scatter.setVisible(self.chk_exh.isChecked())
+            self.react_scatter.setVisible(self.chk_react.isChecked())
             return
         (xmin, xmax), _ = self.price.getViewBox().viewRange()
         vis = float(xmax - xmin) / self._data.bar_seconds    # cate lumanari sunt vizibile
@@ -1746,6 +1770,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.big_scatter.setVisible(self.chk_big.isChecked())
         self.abs_scatter.setVisible(self.chk_abs.isChecked())
         self.exh_scatter.setVisible(self.chk_exh.isChecked())
+        self.react_scatter.setVisible(self.chk_react.isChecked())
 
     def _reload_keep(self):
         """Reload care PASTREAZA pozitia din replay + zoom-ul (interval/VA%/rezolutie)."""
@@ -1847,6 +1872,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self.exh_scatter.setData(spots)
         else:
             self.exh_scatter.setData([])
+
+        # Acceptance / Rejection - INELE la marginile Value Area (verde bullish / mov bearish)
+        if getattr(d, "level_reactions", None):
+            up_c = QtGui.QColor(theme.UP); dn_c = QtGui.QColor(theme.DOWN)
+            spots = []
+            for ep, price, kind, lvl in d.level_reactions:
+                bullish = kind in ("rejection_up", "acceptance_up")
+                col = up_c if bullish else dn_c
+                fill = QtGui.QColor(col); fill.setAlpha(45)   # inel translucid (distinct de bulele pline)
+                info = ("react", kind, lvl, price, ep)
+                spots.append({"pos": (ep, price), "symbol": "o", "size": 15,
+                              "pen": pg.mkPen(col, width=2), "brush": pg.mkBrush(fill), "data": info})
+            self.react_scatter.setData(spots)
+        else:
+            self.react_scatter.setData([])
         self._apply_lod()   # Smart Layers: vizibilitatea straturilor dupa zoom (Auto) sau manual
 
         self._set_nodes(d.hvn, d.lvn)

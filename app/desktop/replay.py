@@ -13,7 +13,8 @@ import numpy as np
 
 from core import VolumeProfileEngine, DeltaEngine
 from app.desktop.data_service import (DayData, _top_nodes, detect_absorption,
-                                      detect_exhaustion, BIG_TRADE_MIN, _detector_defaults)
+                                      detect_exhaustion, detect_level_reactions,
+                                      BIG_TRADE_MIN, _detector_defaults)
 
 CHECKPOINT_EVERY = 40   # salvam starea la fiecare N lumanari -> seek inapoi rapid
 
@@ -228,6 +229,10 @@ class Replay:
         dev_vah = np.append(f.dev_vah[:nc], cur_vah) if len(f.dev_vah) else np.array([cur_vah])
         dev_val = np.append(f.dev_val[:nc], cur_val) if len(f.dev_val) else np.array([cur_val])
 
+        # Acceptance/Rejection la marginile VA developing (doar lumanari inchise)
+        react0 = detect_level_reactions(t, o, h, l, c, dev_poc, dev_vah, dev_val,
+                                        self.row_size, exclude_last=True)
+
         # Speed of tape (T/s): lumanari inchise = nr. print-uri precalculat; cea in formare =
         # print-urile hranite pana acum (developing, determinist dupa cursor).
         start_cur = int(self.candle_end[cc - 1]) if cc > 0 else 0
@@ -247,6 +252,6 @@ class Replay:
             cum_delta=der.cumulative_delta, buy_total=der.total_buy_volume,
             sell_total=der.total_sell_volume,
             mode=f.mode, incomplete=f.incomplete, footprint=fp, big_trades=big,
-            absorption=abs0, exhaustion=exh0,
+            absorption=abs0, exhaustion=exh0, level_reactions=react0,
             dev_poc=dev_poc, dev_vah=dev_vah, dev_val=dev_val, tps=tps,
         )

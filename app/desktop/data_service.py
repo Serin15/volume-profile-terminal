@@ -63,6 +63,7 @@ class DayData:
     big_trades: list = field(default_factory=list)   # (epoca, pret, marime, side)
     absorption: list = field(default_factory=list)   # (epoca, pret, kind) kind: "bull"/"bear"
     exhaustion: list = field(default_factory=list)   # (epoca, pret, kind, vol, delta) kind: "top"/"bot"
+    level_reactions: list = field(default_factory=list)  # (epoca, pret, kind, lvl): Acc/Rej la nivel developing
     # Developing POC / Value Area: valoarea per lumanare, cumulativ de la inceputul sesiunii
     dev_poc: np.ndarray = field(default_factory=lambda: np.zeros(0))
     dev_vah: np.ndarray = field(default_factory=lambda: np.zeros(0))
@@ -310,6 +311,48 @@ def detect_exhaustion(footprint, t, high, low, close, volume, exclude_last=False
             out.append((ep, float(hi[i]), "top", vol, delta))   # cumparatori epuizati la maxim
         elif new_low and delta < 0 and -delta >= delta_frac * vol:
             out.append((ep, float(lo[i]), "bot", vol, delta))   # vanzatori epuizati la minim
+    return out
+
+
+def detect_level_reactions(t, o, h, l, c, dev_poc, dev_vah, dev_val, row_size,
+                           exclude_last=False, lookback=20, poke_ratio=0.35,
+                           accept_ratio=0.5, min_sep=5):
+    """Acceptance / Rejection la MARGINILE Value Area developing (VAH/VAL) - concept Market
+    Profile: pretul ACCEPTA sau RESPINGE iesirea din valoare. CAUZAL (dev_* la bara i + OHLC
+    <= i), per bara INCHISA, FILTRAT -> putine si notabile (nu tapet, NU la POC=magnet).
+      Rejection = wick IESE din valoare (peste VAH / sub VAL) dar inchide INAPOI inauntru.
+      Acceptance = inchide DECISIV in afara valorii (breakout care tine).
+    Returneaza [(epoca, pret_nivel, kind, lvl)] cu kind in
+    {rejection_up, rejection_down, acceptance_up, acceptance_down}."""
+    out = []
+    n = len(t)
+    last = n - (1 if exclude_last else 0)
+    rng_series = np.asarray(h, float) - np.asarray(l, float)
+    last_emit = -999            # dedupe GLOBAL (nu per-tip) -> fara markere lipite
+    for i in range(lookback, last):
+        seg = rng_series[max(0, i - lookback):i]
+        rng = float(np.median(seg)) if len(seg) else 0.0
+        if rng <= 0:
+            continue
+        poke, acc, tol = poke_ratio * rng, accept_ratio * rng, 0.5 * row_size
+        oi, hi, li, ci = float(o[i]), float(h[i]), float(l[i]), float(c[i])
+        vah, val = float(dev_vah[i]), float(dev_val[i])
+        cand = None
+        if vah > 0 and hi > vah + poke and ci < vah - tol:            # respins la VAH (bearish)
+            cand = (hi - vah, vah, "rejection_down", "vah")
+        elif val > 0 and li < val - poke and ci > val + tol:          # respins la VAL (bullish)
+            cand = (val - li, val, "rejection_up", "val")
+        elif vah > 0 and oi <= vah + tol and ci > vah + acc:          # acceptat peste VAH (bullish)
+            cand = (ci - vah, vah, "acceptance_up", "vah")
+        elif val > 0 and oi >= val - tol and ci < val - acc:          # acceptat sub VAL (bearish)
+            cand = (val - ci, val, "acceptance_down", "val")
+        if cand is None:
+            continue
+        _, price, kind, lk = cand
+        if i - last_emit < min_sep:
+            continue
+        last_emit = i
+        out.append((int(round(t[i])), float(price), kind, lk))
     return out
 
 
@@ -696,6 +739,9 @@ def load_day(filename, va_percent=0.70, interval="5min", row_size=2.0,
     # Developing POC/VA: trail-ul cumulativ per lumanare (ultima valoare = POC/VA total)
     dev_poc, dev_vah, dev_val = developing_levels(footprint, t, row_size, va_percent)
 
+    # Acceptance / Rejection: reactii la nivelurile developing (VAH/VAL/POC), filtrate
+    level_reactions = detect_level_reactions(t, o_, h_, l_, c_, dev_poc, dev_vah, dev_val, row_size)
+
     # Speed of tape: nr. de trade-uri (print-uri) pe secunda per lumanare. Independent de
     # volum - multe print-uri mici = tape rapid; putine mari = tape lent (blocuri).
     if len(t):
@@ -716,7 +762,7 @@ def load_day(filename, va_percent=0.70, interval="5min", row_size=2.0,
         total_volume=vpr.total_volume, cum_delta=der.cumulative_delta,
         buy_total=der.total_buy_volume, sell_total=der.total_sell_volume,
         mode=mode, incomplete=incomplete, footprint=footprint, big_trades=big_trades,
-        absorption=absorption, exhaustion=exhaustion,
+        absorption=absorption, exhaustion=exhaustion, level_reactions=level_reactions,
         dev_poc=dev_poc, dev_vah=dev_vah, dev_val=dev_val, tps=tps,
     )
 
