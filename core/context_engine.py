@@ -790,6 +790,7 @@ POC_MIGRATION_DEFAULTS = {
     "min_bars": 6,               # sub atat -> INSUFFICIENT_EVIDENCE
     "dir_ratio": 0.35,           # |net| >= dir_ratio * (deplasare tipica * window) -> directional
     "strong_consistency": 0.6,   # consistenta >= atat -> migratie STRONG (altfel WEAK)
+    "roll_min": 20,              # fereastra MOBILA (minute) pt POC-ul care chiar migreaza (nu cumulativ)
 }
 
 POC_MIGRATION_STATES = ("POC_RISING", "POC_FALLING", "POC_SIDEWAYS", "INSUFFICIENT_EVIDENCE")
@@ -809,14 +810,41 @@ class PocMigrationContext:
     adaptive_scale: float        # referinta de semnificatie (deplasare tipica * window)
 
 
+def _rolling_poc_series(snapshot, roll_bars, need):
+    """POC pe FEREASTRA MOBILA (ultimele roll_bars) la fiecare din ultimele `need` bare, din
+    footprint. Spre deosebire de POC-ul developing/cumulativ (inert -> ~always SIDEWAYS), asta
+    chiar migreaza cu pretul. None daca footprint indisponibil -> fallback pe poc_series."""
+    fp = snapshot.footprint
+    n = len(snapshot.t)
+    if not fp or n < 2:
+        return None
+    epochs = [int(round(e)) for e in snapshot.t]
+    out = []
+    for k in range(max(0, n - need), n):
+        acc = {}
+        for j in range(max(0, k - roll_bars + 1), k + 1):
+            for price, bs in fp.get(epochs[j], {}).items():
+                acc[price] = acc.get(price, 0.0) + bs[0] + bs[1]
+        if acc:
+            out.append(max(acc.items(), key=lambda kv: kv[1])[0])
+        else:
+            out.append(out[-1] if out else float(snapshot.poc or 0.0))
+    return np.asarray(out, dtype=float) if out else None
+
+
 def analyze_poc_migration(snapshot: Snapshot, cfg=None) -> PocMigrationContext:
     """Componenta POC Migration - pura, determinista, cauzala. Directie + magnitudine +
-    viteza + consistenta ale POC-ului developing. Praguri adaptive la deplasarea recenta."""
+    viteza + consistenta ale POC-ului pe FEREASTRA MOBILA (~roll_min minute). Foloseste
+    footprint-ul cauzal (<=T); fallback pe poc_series developing daca footprint lipseste."""
     c = {**POC_MIGRATION_DEFAULTS, **(cfg or {})}
-    poc = np.asarray(snapshot.poc_series, dtype=float)
     tick = snapshot.tick_size or 0.25
-    n = len(poc)
     W = int(c["window"])
+    need = max(W, int(c["scale_lookback"])) + 1
+    bar_sec = snapshot.bar_seconds or 60
+    roll_bars = max(3, int(round(c["roll_min"] * 60 / bar_sec)))
+    roll = _rolling_poc_series(snapshot, roll_bars, need)
+    poc = roll if roll is not None else np.asarray(snapshot.poc_series, dtype=float)
+    n = len(poc)
 
     def none(state):
         cur = float(poc[-1]) if n else 0.0
