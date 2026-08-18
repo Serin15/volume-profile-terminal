@@ -218,8 +218,9 @@ def _classify_delta_state(cur, prev, neutral, acceleration, side):
     """Regula de clasificare (pura). Ordine: neutral -> flip -> accel/decel -> agresiune sustinuta."""
     if cur == 0.0 or abs(cur) < neutral:
         return "NEUTRAL"
-    # DELTA_FLIP: semnul curent difera de al barei anterioare (ambele non-neglijabile)
-    if prev is not None and prev != 0.0 and (cur > 0) != (prev > 0):
+    # DELTA_FLIP: semnul curent difera de al barei anterioare, AMBELE semnificative (>= neutral).
+    # (Inainte se cerea doar prev != 0 -> pe 1min orice prev mic de semn opus dadea FLIP = zgomot.)
+    if prev is not None and abs(prev) >= neutral and (cur > 0) != (prev > 0):
         return "DELTA_FLIP"
     if acceleration == "ACCELERATING":
         return f"{side}_ACCELERATION"
