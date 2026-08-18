@@ -1836,39 +1836,47 @@ class MainWindow(QtWidgets.QMainWindow):
             self.big_scatter.setData(x=[], y=[])
         self._set_bt_zones(d.big_trades)   # zone S/R din cele mai mari tranzactii (optional)
 
-        # Absorption - triunghi la extrema respinsa: bull (verde) sub minim, bear (mov) peste maxim
+        # Absorption - triunghi la extrema respinsa: bull sub minim, bear peste maxim.
+        # Finisaj premium: glow translucid dedesubt + triunghi plin cu contur luminos crisp.
         if d.absorption:
             yr = float(d.high.max() - d.low.min()) if len(d.high) else 1.0
             off = max(yr * 0.014, d.row_size)
-            abs_b = pg.mkBrush(QtGui.QColor(theme.ABSORPTION))       # galben = categoria Absorption
-            halo = pg.mkPen(QtGui.QColor(theme.ABSORPTION), width=2.4)  # halo -> sare in ochi
+            base = QtGui.QColor(theme.ABSORPTION)                    # galben = categoria Absorption
+            fill = pg.mkBrush(base)
+            gcol = QtGui.QColor(base); gcol.setAlpha(50); glow = pg.mkBrush(gcol)
+            rim = pg.mkPen(QtGui.QColor(250, 250, 255), width=1.3)   # contur luminos -> pop pe orice fundal
+            nopen = pg.mkPen(None)
             spots = []
             for ep, price, kind, buyv, sellv in d.absorption:
-                # directie prin forma + pozitie: bull = triunghi sus, sub minim; bear = jos, peste maxim
                 info = ("abs", kind, price, buyv, sellv)
-                if kind == "bull":
-                    spots.append({"pos": (ep, price - off), "symbol": "t1", "size": 20,
-                                  "brush": abs_b, "pen": halo, "data": info})
-                else:
-                    spots.append({"pos": (ep, price + off), "symbol": "t", "size": 20,
-                                  "brush": abs_b, "pen": halo, "data": info})
+                sym = "t1" if kind == "bull" else "t"               # bull = triunghi sus; bear = jos
+                y = price - off if kind == "bull" else price + off
+                spots.append({"pos": (ep, y), "symbol": sym, "size": 26, "brush": glow,
+                              "pen": nopen, "data": info})           # glow (halo moale)
+                spots.append({"pos": (ep, y), "symbol": sym, "size": 16, "brush": fill,
+                              "pen": rim, "data": info})             # nucleu crisp
             self.abs_scatter.setData(spots)
         else:
             self.abs_scatter.setData([])
 
-        # Exhaustion - romb la climaxul de la o extrema noua: top (sub-forma jos, peste maxim) /
-        # bot (sus, sub minim). Culoare coral = avertisment climax/reversal.
+        # Exhaustion - romb la climaxul de la o extrema noua (coral = avertisment reversal).
+        # Finisaj premium: glow translucid + romb plin cu contur luminos.
         if d.exhaustion:
             yr = float(d.high.max() - d.low.min()) if len(d.high) else 1.0
             off = max(yr * 0.018, d.row_size)
-            exh_b = pg.mkBrush(QtGui.QColor(theme.EXHAUSTION))
-            exh_halo = pg.mkPen(QtGui.QColor(theme.EXHAUSTION), width=2.2)
+            base = QtGui.QColor(theme.EXHAUSTION)
+            fill = pg.mkBrush(base)
+            gcol = QtGui.QColor(base); gcol.setAlpha(50); glow = pg.mkBrush(gcol)
+            rim = pg.mkPen(QtGui.QColor(250, 250, 255), width=1.3)
+            nopen = pg.mkPen(None)
             spots = []
             for ep, price, kind, vol, delta in d.exhaustion:
                 info = ("exh", kind, price, vol, delta)
                 yoff = price + off if kind == "top" else price - off
-                spots.append({"pos": (ep, yoff), "symbol": "d", "size": 17,
-                              "brush": exh_b, "pen": exh_halo, "data": info})
+                spots.append({"pos": (ep, yoff), "symbol": "d", "size": 24, "brush": glow,
+                              "pen": nopen, "data": info})
+                spots.append({"pos": (ep, yoff), "symbol": "d", "size": 15, "brush": fill,
+                              "pen": rim, "data": info})
             self.exh_scatter.setData(spots)
         else:
             self.exh_scatter.setData([])
