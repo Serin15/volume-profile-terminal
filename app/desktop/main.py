@@ -228,6 +228,17 @@ _HR_COMP = {
 }
 
 
+def _ctx_config_for_interval(bar_seconds):
+    """Config Context Engine adaptat la INTERVAL: absorption/exhaustion din PANOU mai stricte pe
+    granularitate fina (1-2 min), ca sa NU se aprinda constant pe 1min - aliniat cu markerele de
+    pe chart. (CVD divergence + LVN verificate empiric ca acceptabile pe 1min -> neatinse.)"""
+    if bar_seconds <= 120:      # 1-2 min (scalping)
+        win = max(3, int(round(1800 / bar_seconds)))
+        return {"absorption": {"frac": 0.30, "min_vol_ratio": 0.40},
+                "exhaustion": {"window": win, "vol_mult": 3.5, "delta_frac": 0.25}}
+    return {}
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1515,6 +1526,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_warn.setText(
             "⚠ sesiune incompleta (lipseste ziua precedenta)" if d.incomplete else "")
         self._data_full = d
+        # Context Engine cu praguri adaptate la INTERVAL (panoul abs/exh nu se aprinde constant pe 1min)
+        self._ctx_engine = ContextEngine(
+            config=_ctx_config_for_interval(INTERVAL_SECONDS[self.cbo_interval.currentText()]))
         self._apply_tz()   # recalculeaza fusul pentru DATA acestei zile (ora vara/iarna corecta)
         self._update_prior_levels()   # nivelurile sesiunii precedente (yPOC/yVAH/yVAL/PDH/PDL)
         self._update_session_profiles()  # profile separate Asia/Londra/NY (VAH/VAL + LVN)
