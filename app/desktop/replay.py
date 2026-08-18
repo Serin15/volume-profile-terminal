@@ -13,7 +13,7 @@ import numpy as np
 
 from core import VolumeProfileEngine, DeltaEngine
 from app.desktop.data_service import (DayData, _top_nodes, detect_absorption,
-                                      detect_exhaustion, BIG_TRADE_MIN)
+                                      detect_exhaustion, BIG_TRADE_MIN, _detector_defaults)
 
 CHECKPOINT_EVERY = 40   # salvam starea la fiecare N lumanari -> seek inapoi rapid
 
@@ -28,6 +28,8 @@ class Replay:
         self.bar = full.bar_seconds
         self._abs_params = abs_params or {}
         self._exh_params = exh_params or {}
+        # praguri absorption/exhaustion adaptate la interval (base) + override-uri din ⚙
+        self._abs_base, self._exh_base = _detector_defaults(self.bar)
         self._lvn_full = lvn_full_profile
 
         d = df.sort_values("ts", kind="stable")
@@ -211,9 +213,11 @@ class Replay:
                for k in self._big_idx if k < self.cursor]
 
         # Absorption: doar pe lumanarile INCHISE (excludem cea in formare)
-        abs0 = detect_absorption(fp, t, h, l, c, self.row_size, exclude_last=True, **self._abs_params)
+        abs0 = detect_absorption(fp, t, h, l, c, self.row_size, exclude_last=True,
+                                 **{**self._abs_base, **self._abs_params})
         # Exhaustion: climax pe lumanarile inchise (excludem cea in formare)
-        exh0 = detect_exhaustion(fp, t, h, l, c, vol, exclude_last=True, **self._exh_params)
+        exh0 = detect_exhaustion(fp, t, h, l, c, vol, exclude_last=True,
+                                 **{**self._exh_base, **self._exh_params})
 
         # Developing POC/VA: trail-ul lumanarilor inchise (precalculat, identic) + valoarea
         # curenta a lumanarii in formare -> se dezvolta in replay fara cost per-cadru.

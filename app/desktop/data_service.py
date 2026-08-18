@@ -215,6 +215,24 @@ EXH_VOL_MULT = 2.0   # climax: volum >= EXH_VOL_MULT x mediana (ridicat pt volum
 EXH_DELTA_FRAC = 0.20  # delta in directia trendului >= 20% din volumul lumanarii
 
 
+def _detector_defaults(bar_seconds):
+    """Praguri absorption/exhaustion ADAPTATE la interval, ca detectorii sa prinda aceleasi
+    evenimente REALE indiferent de timeframe (altfel pe 1min exhaustion trage ~35x/zi = tapet,
+    pe 15min ~0). Fereastra exhaustion in TIMP (~30 min); granularitatea fina (1-2 min, scalping)
+    cere prag de climax mai strict fiindca volumul de 1min e mai zgomotos. Validat pe date reale:
+    1min -> ~5 exhaustion + ~3 absorption/sesiune (fata de ~35 + ~9 la pragurile fixe vechi).
+    Mediu (5-15 min) = calibrarea validata initial (NESCHIMBAT). Returneaza (abs_kw, exh_kw)."""
+    if bar_seconds <= 120:            # 1-2 min (scalping fin)
+        win = max(3, int(round(1800 / bar_seconds)))     # ~30 min de lookback
+        return ({"min_vol": 85, "frac": 0.30},
+                {"window": win, "vol_mult": 3.5, "delta_frac": 0.25})
+    if bar_seconds <= 900:            # 5-15 min (neschimbat)
+        return ({"min_vol": ABS_MIN_VOL, "frac": ABS_FRAC},
+                {"window": EXH_WINDOW, "vol_mult": EXH_VOL_MULT, "delta_frac": EXH_DELTA_FRAC})
+    return ({"min_vol": 60, "frac": 0.20},                # coarse (>15 min)
+            {"window": 10, "vol_mult": 1.8, "delta_frac": EXH_DELTA_FRAC})
+
+
 def detect_absorption(footprint, t, high, low, close, row_size, exclude_last=False,
                       min_vol=ABS_MIN_VOL, dom=ABS_DOM, frac=ABS_FRAC,
                       reject=ABS_REJECT, zone=ABS_ZONE):
@@ -668,11 +686,12 @@ def load_day(filename, va_percent=0.70, interval="5min", row_size=2.0,
 
     big_trades = _big_trades(tk.df, INTERVAL_SECONDS[interval], min_size=big_trade_min)
 
-    # Absorption: volum agresiv mare la extrema lumanarii, respins (pret nu continua)
-    absorption = detect_absorption(footprint, t, h_, l_, c_, row_size, **(abs_params or {}))
-
-    # Exhaustion: climax de volum + delta la o extrema noua (ultimul impuls)
-    exhaustion = detect_exhaustion(footprint, t, h_, l_, c_, v_, **(exh_params or {}))
+    # Absorption/Exhaustion: praguri adaptate la INTERVAL (base) + override-uri din ⚙ (user).
+    abs_base, exh_base = _detector_defaults(INTERVAL_SECONDS[interval])
+    absorption = detect_absorption(footprint, t, h_, l_, c_, row_size,
+                                   **{**abs_base, **(abs_params or {})})
+    exhaustion = detect_exhaustion(footprint, t, h_, l_, c_, v_,
+                                   **{**exh_base, **(exh_params or {})})
 
     # Developing POC/VA: trail-ul cumulativ per lumanare (ultima valoare = POC/VA total)
     dev_poc, dev_vah, dev_val = developing_levels(footprint, t, row_size, va_percent)
