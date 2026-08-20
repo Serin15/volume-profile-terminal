@@ -1941,6 +1941,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 int(d.t[-1]) + self._tz_offset, datetime.timezone.utc).strftime("%d.%m %H:%M")
             self.lbl_pos.setText(f"{tstr} {self._tz_label}   ·   bar {idx + 1}/{self._replay.n_candles}")
 
+        # Faza 2: alimenteaza dock-ul Historical Profiles cu starea de replay (cursor CAUZAL).
+        # `d` in replay = snapshot cauzal (doar date <= cursor). Static (fara replay) -> clear.
+        # NU atinge nimic vizual pe Main Chart; doar impinge date catre dock (sync e opt-in).
+        dock = getattr(self, "hist_dock", None)
+        if dock is not None:
+            if self._replay is not None and len(d.t):
+                dock.set_replay_state(self.cbo_day.currentData(), d)
+            else:
+                dock.clear_replay_state()
+
     # ---------- Replay ----------
     def _enter_replay(self):
         d = self._data_full

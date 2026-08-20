@@ -450,6 +450,38 @@ SESSION_DEFS = {
 }
 
 
+def session_window(date, session, sessions=None, mode="real"):
+    """(start, end) epoci UTC pentru o SESIUNE (Asia/Londra/NY) pe o data data.
+
+    Reutilizeaza SESSION_DEFS + ACEEASI ancorare zoneinfo ca period_profiles/
+    session_profiles (auto vara/iarna). Intoarce None pentru 'Full Day'/'Zi'/'Toate'
+    (fara fereastra = toata sesiunea). Accepta si numele prietenoase (New York/London).
+
+    `date`: 'YYYYMMDD' sau nume de fisier (se extrage data). Folosit de sync-ul cauzal
+    din Historical Profiles (Faza 2): fereastra sesiunii zilei de replay, ca sa taiem
+    footprint-ul cauzal exact pe acea sesiune.
+    """
+    if session in (None, "Zi", "Full Day", "Toate", "Toate sesiunile"):
+        return None
+    d = _date_of(date) or (date if isinstance(date, str) and len(date) == 8 else None)
+    if not d or len(d) != 8:
+        return None
+    y, mo, dd = int(d[:4]), int(d[4:6]), int(d[6:8])
+    sessions = sessions or SESSION_DEFS.get(mode, SESSION_DEFS["real"])
+    aliases = {"New York": "NY", "London": "Londra"}      # nume prietenos -> intern
+    want = aliases.get(session, session)
+    for name, tz, (sh, sm), (eh, em) in sessions:
+        if name != want:
+            continue
+        z = ZoneInfo(tz)
+        start = datetime.datetime(y, mo, dd, sh, sm, tzinfo=z).timestamp()
+        end = datetime.datetime(y, mo, dd, eh, em, tzinfo=z).timestamp()
+        if end <= start:
+            end += 86400.0
+        return (start, end)
+    return None
+
+
 def session_profiles(filename, sessions, mode="session",
                      va_percent=0.70, row_size=2.0, lvn_full_profile=False):
     """

@@ -14,14 +14,18 @@ Fiecare card isi alege independent data + sesiunea (Full Day / Asia / London /
 New York) si citeste profilul prin SessionStore (Faza 0) — FARA sa reincarce ticks
 sau sa recalculeze VP. Cardurile sunt independente (nu se contamineaza intre ele).
 
-Faza 1 NU face sincronizare cu replay/cursor (vine in Faza 2): selectezi manual
-ziua + sesiunea si vezi profilul complet al acelei sesiuni istorice.
+Faza 2 (sync OPT-IN cu replay-ul): daca bifezi "Sync to replay cursor" si un card
+selecteaza ZIUA de replay, profilul se calculeaza CAUZAL — doar pe footprint-ul din
+snapshot (deja taiat la cursor), pe fereastra sesiunii. Zilele ISTORICE (deja inchise)
+raman profile COMPLETE. Fara sync (implicit) sau pentru alte zile: profil complet, ca
+in Faza 1. Cauzalitatea vine din Replay (single source of truth); aici doar afisam.
 """
 
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from app.desktop import theme
 from app.desktop.vp_view import VolumeProfileView
+import app.desktop.data_service as ds
 
 
 def _fmt_k(v):
@@ -44,6 +48,10 @@ class ProfileCard(QtWidgets.QFrame):
         self.store = store
         self._row_size = float(row_size)
         self._va = float(va_percent)
+        # Faza 2: starea de replay (setata de panou). Card "live" = sync ON + ziua de replay.
+        self._sync_on = False
+        self._replay_day = None
+        self._replay_snapshot = None
         self.setObjectName("ProfileCard")
         self.setFrameShape(QtWidgets.QFrame.StyledPanel)
 
@@ -111,6 +119,37 @@ class ProfileCard(QtWidgets.QFrame):
         """(filename, session) curent — util in teste."""
         return self.cbo_date.currentData(), self.cbo_session.currentText()
 
+    # ---------- sync cu replay (Faza 2) ----------
+    def set_replay_context(self, replay_day, snapshot, sync_on):
+        """Primeste starea de replay de la panou. NU redeseneaza singur — panoul decide
+        cine se recalculeaza (doar cardurile zilei de replay, la miscarea cursorului)."""
+        self._replay_day = replay_day
+        self._replay_snapshot = snapshot
+        self._sync_on = bool(sync_on)
+
+    def is_live(self):
+        """True daca acest card e taiat la cursor (sync ON + ziua de replay selectata)."""
+        return (self._sync_on and self._replay_snapshot is not None
+                and self.cbo_date.currentData() == self._replay_day)
+
+    def refresh(self):
+        """Redesenare publica (folosita de panou / teste)."""
+        self._refresh()
+
+    def _causal_profiles(self, session):
+        """Profil CAUZAL al zilei de replay pana la cursor: agregat DOAR pe footprint-ul
+        din snapshot (deja taiat la cursor) pe fereastra sesiunii. Reutilizeaza
+        data_service.profile_from_footprint — fara motor nou, fara look-ahead."""
+        fp = self._replay_snapshot.footprint
+        win = ds.session_window(self.cbo_date.currentData(), session)
+        if win is None:
+            epochs = [int(e) for e in fp.keys()]              # Full Day = toata sesiunea (<= cursor)
+        else:
+            s, e = win
+            epochs = [int(ep) for ep in fp.keys() if s <= ep < e]
+        prof = ds.profile_from_footprint(fp, epochs, self._row_size, self._va)
+        return [prof] if prof else []
+
     # ---------- randare ----------
     def _refresh(self, *a):
         filename = self.cbo_date.currentData()
@@ -118,8 +157,11 @@ class ProfileCard(QtWidgets.QFrame):
         profs = []
         if filename:
             try:
-                profs = self.store.get_session_profile(
-                    filename, session=session, row_size=self._row_size, va_percent=self._va)
+                if self.is_live():
+                    profs = self._causal_profiles(session)        # taiat la cursor
+                else:
+                    profs = self.store.get_session_profile(       # complet (istoric / sync off)
+                        filename, session=session, row_size=self._row_size, va_percent=self._va)
             except Exception:
                 profs = []
         if profs:
@@ -148,6 +190,11 @@ class HistoricalProfilePanel(QtWidgets.QDockWidget):
         self._day_items = list(day_items)
         self._row_size = float(row_size)
         self._va = float(va_percent)
+        # Faza 2: sync OPT-IN cu replay-ul (implicit OFF -> comportament Faza 1).
+        self._sync = False
+        self._replay_day = None
+        self._replay_snapshot = None
+        self._last_key = None          # throttle pe (zi, n_ticks): recalcul doar la miscarea cursorului
         self.setObjectName("HistoricalProfileDock")   # necesar pentru saveState/restoreState
         self.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable
                          | QtWidgets.QDockWidget.DockWidgetFloatable
@@ -159,6 +206,13 @@ class HistoricalProfilePanel(QtWidgets.QDockWidget):
 
         title = QtWidgets.QLabel("HISTORICAL PROFILES"); title.setObjectName("HistTitle")
         rv.addWidget(title)
+        self.chk_sync = QtWidgets.QCheckBox("🔗 Sync to replay cursor")
+        self.chk_sync.setToolTip(
+            "Optional. Cand e bifat, cardul cu ZIUA de replay se taie CAUZAL la cursor\n"
+            "(doar date pana la momentul curent, fara look-ahead). Zilele istorice raman\n"
+            "profile complete. Nebifat = toate profilele sunt complete (ca in Faza 1).")
+        self.chk_sync.toggled.connect(self._on_sync_toggled)
+        rv.addWidget(self.chk_sync)
         self.btn_add = QtWidgets.QPushButton("+ Add Profile")
         self.btn_add.clicked.connect(lambda: self.add_card())
         rv.addWidget(self.btn_add)
@@ -192,6 +246,10 @@ class HistoricalProfilePanel(QtWidgets.QDockWidget):
         # inserat inaintea stretch-ului final
         self._cards_lay.insertWidget(self._cards_lay.count() - 1, card)
         self._cards.append(card)
+        # primeste contextul de replay curent (devine cauzal daca e ziua de replay + sync ON)
+        card.set_replay_context(self._replay_day, self._replay_snapshot, self._sync)
+        if card.is_live():
+            card.refresh()
         return card
 
     def _remove_card(self, card):
@@ -216,3 +274,43 @@ class HistoricalProfilePanel(QtWidgets.QDockWidget):
         self._row_size = float(row_size)
         for card in self._cards:
             card.set_row_size(row_size)
+
+    # ---------- sync cu replay (Faza 2) ----------
+    def set_replay_state(self, day, snapshot):
+        """Primit de la MainWindow la fiecare randare de replay (snapshot = stare CAUZALA
+        la cursor). Throttle pe (zi, n_ticks): recalcul DOAR cand cursorul chiar s-a mutat,
+        si DOAR pentru cardurile zilei de replay (performanta — nu atingem zilele istorice)."""
+        key = (day, getattr(snapshot, "n_ticks", None))
+        if key == self._last_key:
+            return                                  # cursor neschimbat -> nimic de facut
+        self._last_key = key
+        self._replay_day = day
+        self._replay_snapshot = snapshot
+        for c in self._cards:
+            c.set_replay_context(day, snapshot, self._sync)
+        if not self._sync:
+            return                                  # sync OFF -> cardurile raman complete
+        for c in self._cards:
+            if c.cbo_date.currentData() == day:     # doar ziua de replay -> recalcul cauzal
+                c.refresh()
+
+    def clear_replay_state(self):
+        """Iesire din replay / vedere statica: cardurile revin la profil COMPLET. Idempotent."""
+        if self._replay_snapshot is None and self._last_key is None:
+            return
+        self._last_key = None
+        self._replay_day = None
+        self._replay_snapshot = None
+        for c in self._cards:
+            c.set_replay_context(None, None, self._sync)
+            c.refresh()
+
+    def _on_sync_toggled(self, on):
+        """Opt-in ON/OFF. La schimbare, reimprospateaza toate cardurile (rar -> ok)."""
+        self._sync = bool(on)
+        for c in self._cards:
+            c.set_replay_context(self._replay_day, self._replay_snapshot, self._sync)
+            c.refresh()
+
+    def sync_enabled(self):
+        return self._sync
