@@ -74,10 +74,25 @@ class ProfileCard(QtWidgets.QFrame):
         head.addWidget(self.btn_remove)
         outer.addLayout(head)
 
+        # --- selector mod de citire: TOTAL (clean) / SPLIT (buy-sell) / DELTA ---
+        mode_row = QtWidgets.QHBoxLayout(); mode_row.setSpacing(4)
+        self.mode_group = QtWidgets.QButtonGroup(self); self.mode_group.setExclusive(True)
+        self._mode_btns = {}
+        for m in ("TOTAL", "SPLIT", "DELTA"):
+            b = QtWidgets.QToolButton(); b.setText(m); b.setCheckable(True)
+            b.setObjectName("ModeBtn"); b.setCursor(QtCore.Qt.PointingHandCursor)
+            self.mode_group.addButton(b); self._mode_btns[m] = b
+            mode_row.addWidget(b)
+        mode_row.addStretch(1)
+        self._mode_btns["TOTAL"].setChecked(True)
+        outer.addLayout(mode_row)
+
         # --- profilul ---
         self.view = VolumeProfileView()
         self.view.setMinimumHeight(220)
         outer.addWidget(self.view, 1)
+        for m, b in self._mode_btns.items():
+            b.clicked.connect(lambda _=False, mm=m: self.view.set_mode(mm.lower()))
 
         # --- eticheta POC/VAH/VAL ---
         self.lbl_levels = QtWidgets.QLabel("")
@@ -93,7 +108,11 @@ class ProfileCard(QtWidgets.QFrame):
         self.setStyleSheet(
             f"QFrame#ProfileCard{{border:1px solid {theme.BORDER};border-radius:6px;"
             f"background:{theme.BG};}}"
-            f"QLabel#CardLevels{{color:{theme.TEXT_DIM};font-family:'Consolas',monospace;}}")
+            f"QLabel#CardLevels{{color:{theme.TEXT_DIM};font-family:'Consolas',monospace;}}"
+            f"QToolButton#ModeBtn{{color:{theme.TEXT_DIM};background:transparent;"
+            f"border:1px solid {theme.BORDER};border-radius:4px;padding:2px 9px;font-size:11px;}}"
+            f"QToolButton#ModeBtn:checked{{color:{theme.TEXT};border-color:{theme.TEXT_DIM};"
+            f"background:rgba(255,255,255,0.06);}}")
 
         self._refresh()
 
