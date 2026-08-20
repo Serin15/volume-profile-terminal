@@ -76,6 +76,9 @@ class VolumeProfileView(QtWidgets.QWidget):
             "vah": mk(theme.VA_LINE, 1, QtCore.Qt.DashLine),
             "val": mk(theme.VA_LINE, 1, QtCore.Qt.DashLine),
         }
+        # HVN/LVN — numar variabil, recreate la fiecare profil (cyan plin / gri punctat,
+        # aceleasi culori ca pe Main Chart). Marcaje de nod, nu renderer complex.
+        self._node_lines = []
 
         # Stare goala: text centrat, fara date
         self._empty = pg.TextItem("— fără date —", color=theme.TEXT_DIM, anchor=(0.5, 0.5))
@@ -138,6 +141,7 @@ class VolumeProfileView(QtWidgets.QWidget):
                 ln.setPos(y); ln.setVisible(True)
             else:
                 ln.setVisible(False)
+        self._set_nodes(p.get("hvn") or [], p.get("lvn") or [])
 
         # Range: pret pe Y (fit cu padding), volum pe X de la 0
         pmin, pmax = float(prices.min()), float(prices.max())
@@ -164,11 +168,32 @@ class VolumeProfileView(QtWidgets.QWidget):
                 out.append(base_b)
         return out
 
+    def _set_nodes(self, hvn, lvn):
+        """(Re)deseneaza liniile HVN (cyan plin) / LVN (gri punctat) la preturile lor.
+        Numar variabil -> le recreez de fiecare data (cateva noduri, ieftin)."""
+        for ln in self._node_lines:
+            self.plot.removeItem(ln)
+        self._node_lines = []
+        hvn_c = QtGui.QColor(theme.HVN); hvn_c.setAlpha(150)
+        lvn_c = QtGui.QColor(theme.LVN); lvn_c.setAlpha(140)
+        for y in hvn:
+            ln = pg.InfiniteLine(pos=y, angle=0, movable=False, pen=pg.mkPen(hvn_c, width=1))
+            ln.setZValue(-3); self.plot.addItem(ln); self._node_lines.append(ln)
+        for y in lvn:
+            ln = pg.InfiniteLine(pos=y, angle=0, movable=False,
+                                 pen=pg.mkPen(lvn_c, width=1, style=QtCore.Qt.DotLine))
+            ln.setZValue(-3); self.plot.addItem(ln); self._node_lines.append(ln)
+
+    def node_line_count(self):
+        """Numarul de linii HVN+LVN desenate (util in teste)."""
+        return len(self._node_lines)
+
     def _show_empty(self):
         self._bars.setOpts(x0=0, y=[0], height=0, width=[0])
         self._va_band.setVisible(False)
         for ln in self._lines.values():
             ln.setVisible(False)
+        self._set_nodes([], [])
         self.plot.setXRange(0, 1, padding=0)
         self.plot.setYRange(0, 1, padding=0)
         self._empty.setPos(0.5, 0.5)

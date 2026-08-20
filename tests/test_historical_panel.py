@@ -194,3 +194,93 @@ def test_card_routes_through_store(qapp, monkeypatch):
     items = _day_items()
     ProfileCard(store, items, default_file=items[-1][1], row_size=ROW)
     assert calls["n"] >= 1
+
+
+# ================= Punctul 5 + 11: valori din engine, HVN/LVN, no-look-ahead =========
+def test_profile_values_match_engine(qapp):
+    """Valorile afisate == exact ce intoarce engine-ul (via period_profiles): identice
+    POC/VAH/VAL/HVN/LVN/total. Panoul NU recalculeaza — reutilizeaza engine-ul."""
+    import app.desktop.data_service as ds
+    items = _day_items()
+    f = items[-1][1]
+    card = ProfileCard(SessionStore(), items, default_file=f,
+                       default_session="New York", row_size=ROW)
+    shown = card.view._profile
+    direct = ds.period_profiles(f, unit="NY", span="day", row_size=ROW)[0]
+    assert shown is not None
+    for k in ("poc", "vah", "val", "total"):
+        assert shown[k] == direct[k], f"{k} difera de engine"
+    assert list(shown["hvn"]) == list(direct["hvn"])
+    assert list(shown["lvn"]) == list(direct["lvn"])
+
+
+def test_hvn_lvn_displayed(qapp):
+    """HVN/LVN chiar apar ca linii in profil (nu doar in text)."""
+    items = _day_items()
+    card = ProfileCard(SessionStore(), items, default_file=items[-1][1],
+                       default_session="New York", row_size=ROW)
+    p = card.view._profile
+    assert card.view.node_line_count() == len(p["hvn"]) + len(p["lvn"])
+
+
+def _set_date(card, ymd):
+    for i in range(card.cbo_date.count()):
+        if ymd in str(card.cbo_date.itemData(i)):
+            card.cbo_date.setCurrentIndex(i)
+            return True
+    return False
+
+
+def test_three_profiles_coexist(qapp):
+    """Exemplul din cerere: 3 zile August -> NY, coexista si sunt distincte."""
+    store = SessionStore()
+    items = _day_items()
+    panel = HistoricalProfilePanel(store, items, row_size=ROW)
+    c1 = panel.cards()[0]
+    c2 = panel.add_card()
+    c3 = panel.add_card()
+    assert _set_date(c1, "20260804") and _set_date(c2, "20260803") and _set_date(c3, "20260805")
+    for c in (c1, c2, c3):
+        c.cbo_session.setCurrentText("New York")
+    assert len(panel.cards()) == 3
+    assert len({c.selection() for c in (c1, c2, c3)}) == 3       # 3 selectii distincte
+    pocs = [c.view._profile["poc"] for c in (c1, c2, c3) if c.view._profile]
+    assert len(pocs) == 3                                        # toate 3 au profil
+
+
+def test_no_lookahead_panel(qapp):
+    """No-look-ahead structural: modulele panoului NU importa replay/cursor, iar profilul
+    afisat e sesiunea ISTORICA COMPLETA (nu trunchiata) — deci nici viitor lipsa, nici in plus."""
+    import ast
+    import inspect
+    import app.desktop.historical_panel as hp
+    import app.desktop.vp_view as vv
+    for mod in (hp, vv):
+        tree = ast.parse(inspect.getsource(mod))
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported |= {n.name for n in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                imported.add(node.module or "")
+        assert not any("replay" in m.lower() for m in imported), (mod.__name__, imported)
+    import app.desktop.data_service as ds
+    items = _day_items()
+    f = items[-1][1]
+    card = ProfileCard(SessionStore(), items, default_file=f,
+                       default_session="Full Day", row_size=ROW)
+    direct = ds.period_profiles(f, unit="Zi", span="day", row_size=ROW)[0]
+    assert card.view._profile["total"] == direct["total"]        # sesiune completa, nimic viitor
+
+
+def test_close_reopen_preserves_app_state(win):
+    """Inchiderea/redeschiderea dock-ului NU strica starea Main Chart-ului."""
+    data_before = win._data
+    n = len(win._data.t) if win._data is not None else 0
+    for state in (True, False, True, False):
+        win.btn_profile_only.setChecked(state)
+    assert win._data is data_before                 # exact acelasi obiect de date
+    assert len(win._data.t) == n
+    assert win.candles.isVisible()                  # Main Chart intact
+    assert [win.cbo_type.itemText(i) for i in range(win.cbo_type.count())] == ["Profil", "Footprint"]
+    assert win.period_profiles_item.isVisible() is False

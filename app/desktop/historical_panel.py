@@ -24,6 +24,14 @@ from app.desktop import theme
 from app.desktop.vp_view import VolumeProfileView
 
 
+def _fmt_k(v):
+    """Volum compact: 1234 -> 1.2K, 12345 -> 12K."""
+    a = abs(v)
+    if a >= 1000:
+        return (f"{v/1000:.1f}K" if a < 10000 else f"{v/1000:.0f}K").replace(".0K", "K")
+    return f"{v:.0f}"
+
+
 class ProfileCard(QtWidgets.QFrame):
     """Un card: selector data + sesiune, un VolumeProfileView si POC/VAH/VAL.
     Reutilizabil si independent — mai multe carduri = mai multe profile comparate."""
@@ -117,8 +125,15 @@ class ProfileCard(QtWidgets.QFrame):
         if profs:
             p = profs[0]
             self.view.set_profile(p, row_size=self._row_size)
+            bp = p["bin_price"]
+            hi, lo = float(bp.max()), float(bp.min())
+            delta = float(p["bin_buy"].sum() - p["bin_sell"].sum())
+            dsign = "+" if delta >= 0 else "-"
+            nh, nl = len(p.get("hvn") or []), len(p.get("lvn") or [])
             self.lbl_levels.setText(
-                f"POC {p['poc']:.2f}    VAH {p['vah']:.2f}    VAL {p['val']:.2f}")
+                f"POC {p['poc']:.2f}   VAH {p['vah']:.2f}   VAL {p['val']:.2f}\n"
+                f"Vol {_fmt_k(p['total'])}  ·  Δ {dsign}{_fmt_k(abs(delta))}  ·  "
+                f"H {hi:.2f}  L {lo:.2f}  ·  HVN {nh} · LVN {nl}")
         else:
             self.view.clear()
             self.lbl_levels.setText("— fără date pentru selecție —")
@@ -128,7 +143,7 @@ class HistoricalProfilePanel(QtWidgets.QDockWidget):
     """Dock-ul cu profile istorice. Detasabil, mutabil, redimensionabil, inchidibil."""
 
     def __init__(self, store, day_items, row_size=2.0, va_percent=0.70, parent=None):
-        super().__init__("Historical Profile", parent)
+        super().__init__("Historical Profiles", parent)
         self.store = store
         self._day_items = list(day_items)
         self._row_size = float(row_size)
