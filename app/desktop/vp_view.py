@@ -183,9 +183,9 @@ class VolumeProfileView(QtWidgets.QWidget):
             ln.setVisible(y is not None)
             if y is not None:
                 ln.setPos(y)
-        self._set_nodes(p.get("hvn") or [], p.get("lvn") or [])
         self._hover_line.setVisible(False); self._hover_tip.setVisible(False)
-        self._apply_range(prices, total, buy, sell)
+        self._apply_range(prices, total, buy, sell)   # range FIRST — tick-urile de nod au nevoie de el
+        self._set_nodes(p.get("hvn") or [], p.get("lvn") or [])
 
     def _draw_total(self, prices, total, poc, vah, val):
         h = self._row_size * 0.9
@@ -247,20 +247,25 @@ class VolumeProfileView(QtWidgets.QWidget):
             self.plot.setXRange(0, maxtot * 1.08, padding=0)
 
     def _set_nodes(self, hvn, lvn):
-        """HVN (cyan plin, subtil) / LVN (gri punctat). Doar nodurile de la engine (<=9).
-        Diferentiate clar; discrete ca sa nu concureze cu barele."""
-        for ln in self._node_lines:
-            self.plot.removeItem(ln)
+        """HVN (cyan plin) / LVN (gri punctat) ca TICK-URI SCURTE pe marginea din dreapta
+        (lângă axa de preț), NU linii pe toată lățimea → nu concurează cu barele, dar rămân
+        vizibile în toate modurile. Doar nodurile de la engine (<=9). Diferentiate clar."""
+        for it in self._node_lines:
+            self.plot.removeItem(it)
         self._node_lines = []
-        hvn_c = QtGui.QColor(theme.HVN); hvn_c.setAlpha(120)
-        lvn_c = QtGui.QColor(theme.LVN); lvn_c.setAlpha(120)
+        if not hvn and not lvn:
+            return
+        (x0, x1), _ = self.plot.getViewBox().viewRange()   # range setat deja (_apply_range)
+        xa = x1 - (x1 - x0) * 0.12                          # tick scurt langa marginea din dreapta
+        hvn_c = QtGui.QColor(theme.HVN); hvn_c.setAlpha(215)
+        lvn_c = QtGui.QColor(theme.LVN); lvn_c.setAlpha(195)
         for y in hvn:
-            ln = pg.InfiniteLine(pos=y, angle=0, movable=False, pen=pg.mkPen(hvn_c, width=1))
-            ln.setZValue(-3); self.plot.addItem(ln); self._node_lines.append(ln)
+            seg = pg.PlotDataItem([xa, x1], [y, y], pen=pg.mkPen(hvn_c, width=2.4))
+            seg.setZValue(9); self.plot.addItem(seg, ignoreBounds=True); self._node_lines.append(seg)
         for y in lvn:
-            ln = pg.InfiniteLine(pos=y, angle=0, movable=False,
-                                 pen=pg.mkPen(lvn_c, width=1, style=QtCore.Qt.DotLine))
-            ln.setZValue(-3); self.plot.addItem(ln); self._node_lines.append(ln)
+            seg = pg.PlotDataItem([xa, x1], [y, y],
+                                  pen=pg.mkPen(lvn_c, width=2.0, style=QtCore.Qt.DotLine))
+            seg.setZValue(9); self.plot.addItem(seg, ignoreBounds=True); self._node_lines.append(seg)
 
     def _show_empty(self):
         self._bars.setOpts(x0=0, y=[0], height=0, width=[0])
