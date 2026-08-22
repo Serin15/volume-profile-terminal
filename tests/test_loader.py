@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from data import load_ticks, session_date_for, SESSION_START_UTC_HOUR
+from data import load_ticks, session_date_for, SESSION_TZ, SESSION_BOUNDARY_HOUR
 
 
 CSV_CONTENT = """ts_recv,price,size,side,symbol
@@ -52,9 +52,10 @@ def test_session_boundary(tmp_path):
     assert len(sessions["2026-07-07"]) == 2  # 22:30 + 23:00
 
 
-def test_session_date_for_rule():
-    assert SESSION_START_UTC_HOUR == 22
-    before = pd.Timestamp("2026-07-06T21:59:00Z")
-    after = pd.Timestamp("2026-07-06T22:30:00Z")
+def test_session_date_for_rule_summer_unchanged():
+    """Vara (EDT): granita 18:00 ET = 22:00 UTC -> comportamentul de dinainte, NESCHIMBAT."""
+    assert (SESSION_TZ, SESSION_BOUNDARY_HOUR) == ("America/New_York", 18)
+    before = pd.Timestamp("2026-07-06T21:59:00Z")   # 17:59 EDT -> sesiunea 06
+    after = pd.Timestamp("2026-07-06T22:30:00Z")    # 18:30 EDT -> sesiunea 07
     assert session_date_for(before) == "2026-07-06"
     assert session_date_for(after) == "2026-07-07"

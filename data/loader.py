@@ -8,7 +8,7 @@ O SINGURA sursa de adevar pentru:
   - citirea unui fisier Databento (schema Trades, CME GLBX.MDP3)
   - alegerea automata a simbolului activ (volumul cel mai mare)
   - accesul la side (agresor) si timestamp
-  - granita CORECTA de sesiune futures (22:00 UTC -> 22:00 UTC)
+  - granita CORECTA de sesiune futures (18:00 ET, DST-aware: 22:00 UTC vara / 23:00 iarna)
   - citirea din Parquet cand exista (mult mai rapid decat CSV)
 
 Coloane asteptate in CSV Databento (Trades, cu "Include symbol field"):
@@ -25,9 +25,11 @@ from datetime import timedelta
 
 import pandas as pd
 
-# Ora UTC la care incepe o noua sesiune de trading futures (CME NQ).
-# 18:00 ET = 22:00 UTC vara (EDT). Confirmat cu surse externe in handoff.
-SESSION_START_UTC_HOUR = 22
+# Granita sesiunii de trading futures CME (NQ): 18:00 America/New_York (= 17:00 CT).
+# DST-AWARE: convertim tick-ul in ET si comparam ora LOCALA (18:00), NU o ora UTC fixa.
+# Astfel granita e corecta si vara (18:00 EDT = 22:00 UTC) si iarna (18:00 EST = 23:00 UTC).
+SESSION_TZ = "America/New_York"
+SESSION_BOUNDARY_HOUR = 18
 
 # Coloanele CSV brut Databento de care avem nevoie (ignoram restul).
 _CSV_COLS = ["ts_recv", "price", "size", "side", "symbol"]
@@ -83,7 +85,7 @@ class SessionTicks:
 
     def by_session(self):
         """
-        Grupeaza tick-urile pe SESIUNE reala (22:00 UTC -> 22:00 UTC),
+        Grupeaza tick-urile pe SESIUNE reala futures (granita la 18:00 ET, DST-aware),
         nu pe ziua calendaristica UTC bruta.
 
         Returneaza dict {session_date (str 'YYYY-MM-DD'): SessionTicks}.
@@ -91,10 +93,14 @@ class SessionTicks:
         marginile intervalului - vezi nota din handoff.
         """
         df = self.df.copy()
-        # Regula: daca ora UTC >= 22, tick-ul apartine sesiunii zilei urmatoare.
-        shifted = df["ts"] + pd.to_timedelta(
-            (df["ts"].dt.hour >= SESSION_START_UTC_HOUR).astype(int), unit="D"
-        )
+        # Regula DST-AWARE: convertim in ET; daca ora LOCALA >= 18:00, tick-ul apartine
+        # sesiunii zilei urmatoare. Corect si vara (18:00 EDT=22:00 UTC) si iarna
+        # (18:00 EST=23:00 UTC). ts poate fi tz-naive (parquet) -> il tratam ca UTC.
+        ts = df["ts"]
+        if ts.dt.tz is None:
+            ts = ts.dt.tz_localize("UTC")
+        et = ts.dt.tz_convert(SESSION_TZ)
+        shifted = et + pd.to_timedelta((et.dt.hour >= SESSION_BOUNDARY_HOUR).astype(int), unit="D")
         df["session"] = shifted.dt.date.astype(str)
 
         out = {}
@@ -111,11 +117,16 @@ class SessionTicks:
 def session_date_for(ts) -> str:
     """
     Sesiunea de trading din care face parte un timestamp (nu ziua calendaristica).
-    ts: pandas.Timestamp sau datetime, in UTC.
+    ts: pandas.Timestamp sau datetime (UTC; tz-naive e tratat ca UTC).
+    Granita la 18:00 ET, DST-aware (vara 22:00 UTC / iarna 23:00 UTC).
     """
-    if ts.hour >= SESSION_START_UTC_HOUR:
-        return (ts + timedelta(days=1)).date().isoformat()
-    return ts.date().isoformat()
+    ts = pd.Timestamp(ts)
+    if ts.tz is None:
+        ts = ts.tz_localize("UTC")
+    et = ts.tz_convert(SESSION_TZ)
+    if et.hour >= SESSION_BOUNDARY_HOUR:
+        return (et + timedelta(days=1)).date().isoformat()
+    return et.date().isoformat()
 
 
 def _resolve_path(path_or_name: str):

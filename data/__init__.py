@@ -4,7 +4,8 @@ from data.loader import (
     load_ticks,
     load_many,
     SessionTicks,
-    SESSION_START_UTC_HOUR,
+    SESSION_TZ,
+    SESSION_BOUNDARY_HOUR,
     session_date_for,
 )
 
@@ -12,6 +13,7 @@ __all__ = [
     "load_ticks",
     "load_many",
     "SessionTicks",
-    "SESSION_START_UTC_HOUR",
+    "SESSION_TZ",
+    "SESSION_BOUNDARY_HOUR",
     "session_date_for",
 ]

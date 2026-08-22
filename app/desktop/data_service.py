@@ -131,8 +131,8 @@ def _contiguous_block(date, available):
 def _get_ticks(filename, mode, available=None):
     """
     mode 'utc'     -> ziua calendaristica UTC (00:00-24:00) din fisierul dat.
-    mode 'session' -> sesiunea futures reala (22:00 UTC ziua precedenta ->
-                      22:00 UTC ziua curenta), combinand fisierul zilei precedente.
+    mode 'session' -> sesiunea futures reala (granita 18:00 ET, DST-aware),
+                      combinand fisierul zilei precedente.
     Intoarce (SessionTicks, is_incomplete).
     """
     if mode != "session":
