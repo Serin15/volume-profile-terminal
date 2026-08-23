@@ -61,7 +61,13 @@ class ProfileCard(QtWidgets.QFrame):
         # --- rand selector: Date + Session + remove ---
         head = QtWidgets.QHBoxLayout(); head.setSpacing(6)
         self.cbo_date = QtWidgets.QComboBox()
+        # Etichetele lungi de zi ("06.08.2026 · TREND ↑") nu trebuie sa umfle cardul (altfel
+        # dock-ul se deschide prea lat / se taie). Se eliddeaza; data ramane vizibila.
+        self.cbo_date.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.cbo_date.setMinimumContentsLength(9)
+        self.cbo_date.setMaximumWidth(140)
         self.cbo_session = QtWidgets.QComboBox()
+        self.cbo_session.setMaximumWidth(120)
         self.cbo_session.addItems(store.available_sessions())
         idx = self.cbo_session.findText(default_session)
         if idx >= 0:
@@ -97,6 +103,7 @@ class ProfileCard(QtWidgets.QFrame):
         # --- eticheta POC/VAH/VAL ---
         self.lbl_levels = QtWidgets.QLabel("")
         self.lbl_levels.setObjectName("CardLevels")
+        self.lbl_levels.setWordWrap(True)   # sa nu forteze cardul/dock-ul lat (linia info e lunga)
         outer.addWidget(self.lbl_levels)
 
         self.set_day_items(day_items, select=default_file)
@@ -219,6 +226,7 @@ class HistoricalProfilePanel(QtWidgets.QDockWidget):
                          | QtWidgets.QDockWidget.DockWidgetFloatable
                          | QtWidgets.QDockWidget.DockWidgetClosable)
         self.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
+        self.setMinimumWidth(390)   # sa incapa un card complet (Date/Session/× + TOTAL/SPLIT/DELTA)
 
         root = QtWidgets.QWidget(); root.setObjectName("HistRoot")
         rv = QtWidgets.QVBoxLayout(root); rv.setContentsMargins(8, 8, 8, 8); rv.setSpacing(6)

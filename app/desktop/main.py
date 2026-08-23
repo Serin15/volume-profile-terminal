@@ -351,10 +351,20 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self._sep())
 
         self.cbo_day = QtWidgets.QComboBox()
+        # Etichetele lungi ("15.06.2026 · TREND ↑") nu trebuie sa umfle bara de sus peste
+        # ecran; se eliddeaza (data ramane vizibila), selectia e neschimbata.
+        self.cbo_day.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.cbo_day.setMinimumContentsLength(10)
+        self.cbo_day.setMaximumWidth(190)
         for f in discover_files():
             self.cbo_day.addItem(nice_label(f), userData=f)
         # Session Browser + Compare: a doua sesiune de suprapus (profil + niveluri)
         self.cbo_compare = QtWidgets.QComboBox()
+        # Nu lasa etichetele lungi ("15.06.2026 · TREND ↑") sa umfle bara de straturi
+        # (altfel forteaza latimea ferestrei peste ecran). Se eliddeaza, selectia ramane.
+        self.cbo_compare.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.cbo_compare.setMinimumContentsLength(8)
+        self.cbo_compare.setMaximumWidth(150)
         self.cbo_compare.addItem("— fara —", userData=None)
         for f in discover_files():
             self.cbo_compare.addItem(nice_label(f), userData=f)
@@ -666,7 +676,20 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.chk_sess); lay.addWidget(self.btn_sess_settings)
         lay.addStretch(1)
         lay.addWidget(grp("COMPARĂ")); lay.addWidget(self.cbo_compare)    # Session Browser + Compare
-        return bar
+        # Scroll orizontal: bara de straturi NU mai forteaza latimea MINIMA a ferestrei peste
+        # ecran. Fara asta, pe un monitor de 1920 panoul Context si dock-ul Historical Profiles
+        # (cel mai din dreapta) ieseau off-screen. Daca toate toggle-urile nu incap, apare un
+        # scroll orizontal subtil, in loc sa impinga continutul in afara ecranului.
+        scroll = QtWidgets.QScrollArea(); scroll.setObjectName("LayerBarScroll")
+        scroll.setWidget(bar); scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        scroll.setFixedHeight(bar.sizeHint().height() + 14)   # loc pt scrollbar-ul orizontal
+        # minimumWidth explicit MIC -> altfel scroll area foloseste minimumSizeHint-ul barei
+        # (~1940) si tot forteaza fereastra. Cu 120, bara scroll-eaza in loc sa impinga.
+        scroll.setMinimumWidth(120)
+        return scroll
 
     def _open_fp_settings(self):
         """Panou ⚙ Footprint: pragul de imbalance (nu cere reload - doar re-paint)."""
@@ -823,6 +846,9 @@ class MainWindow(QtWidgets.QMainWindow):
         pg.setConfigOptions(antialias=True)
         self.glw = pg.GraphicsLayoutWidget()
         self.glw.setBackground(theme.BG)
+        # Lasa graficul sa cedeze latime (altfel sizeHint-ul lui pyqtgraph forteaza latimea
+        # minima a ferestrei peste ecran -> panoul Context / dock-ul ies off-screen pe 1920).
+        self.glw.setMinimumWidth(400)
 
         # Pret pe row 0 (profilul e OVERLAY peste el); panou CVD pe row 1 sub el.
         # Axa de pret e PriceAxis: trage de ea (left-drag) ca sa comprimi/extinzi scala.
@@ -2056,6 +2082,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self._render(self._data, set_range=False, follow=self._follow)
 
     # ---------- Nivelurile sesiunii precedente (backtesting) ----------
+    @staticmethod
+    def _refresh_line_label(ln):
+        """Forteaza reformatarea etichetei unei InfiniteLine. pyqtgraph face early-return in
+        InfLineLabel.valueChanged cat linia/eticheta e ascunsa la setPos -> textul ramane pe
+        valoarea veche (ex. 'yPOC 0.00' desi pozitia e corecta). Apelat dupa ce e vizibila."""
+        lbl = getattr(ln, "label", None)
+        if lbl is not None:
+            try:
+                lbl.valueChanged()
+            except Exception:
+                pass
+
     def _update_prior_levels(self):
         """Calculeaza + pozitioneaza yPOC/yVAH/yVAL/PDH/PDL (doar mod '1 zi')."""
         self._prior = None
@@ -2072,6 +2110,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.prior_lines[key].setPos(self._prior[key])
             self.prior_va_band.setRegion((self._prior["val"], self._prior["vah"]))
         self._update_prior_visibility()
+        if self._prior:   # reformateaza etichetele DUPA ce liniile sunt vizibile (vezi helper)
+            for key in ("poc", "vah", "val", "high", "low"):
+                self._refresh_line_label(self.prior_lines[key])
 
     def _update_prior_visibility(self):
         show = self.chk_prior.isChecked() and self._prior is not None
@@ -2385,6 +2426,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for key in ("poc", "vah", "val"):
             self.cmp_lines[key].setPos(getattr(d, key))
             self.cmp_lines[key].setVisible(True)
+            self._refresh_line_label(self.cmp_lines[key])
 
     def _update_session_shading(self, *args):
         """Umbreste OVERNIGHT (Globex) inainte/dupa RTH -> sesiunea NY iese in evidenta.
