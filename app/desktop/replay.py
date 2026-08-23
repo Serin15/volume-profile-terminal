@@ -41,7 +41,8 @@ class Replay:
         self.cepoch = (tsec // self.bar) * self.bar   # epoca lumânării pentru fiecare tick
         self.n = len(self.prices)
         self.cidx_of = {int(round(e)): i for i, e in enumerate(full.t)}
-        self._big_idx = np.where(self.sizes >= big_trade_min)[0]  # indici tranzactii mari
+        self._big_idx = np.where((self.sizes >= big_trade_min)
+                                 & np.isin(self.sides, ("B", "A")))[0]  # mari, doar agresor cunoscut (fara 'N')
         # Speed of tape: nr. de print-uri (trade-uri) per lumanare, aliniat la full.t
         # (folosit pentru randul T/s din grid, developing tick-cu-tick in replay).
         if len(self.cepoch):

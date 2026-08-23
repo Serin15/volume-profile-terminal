@@ -18,5 +18,10 @@ data/raw/
 # Streamlit (prototip vechi)
 .streamlit/
 
+# Build PyInstaller (artefacte, regenerabile din run_desktop.py - NU se comit)
+build/
+dist/
+*.spec
+
 # IDE
 .idea/

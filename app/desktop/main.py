@@ -428,6 +428,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_react.setToolTip("Acceptance / Rejection la marginile Value Area (VAH/VAL): inele\n"
                                   "verzi = reactie bullish (respins la VAL / acceptat peste VAH),\n"
                                   "mov = bearish. Concept Market Profile, filtrat (nu la fiecare bara).")
+        # Filtru optional: arata markerele de order flow DOAR in sesiunea RTH (09:30-16:00 ET).
+        # Overnight, footprint-ul e subtire -> exhaustion/acc-rej apar mai des pe valoare imatura.
+        # Cine tranzactioneaza doar NY vede numai markerele din sesiunea lui. Default OFF (nimic ascuns).
+        self.chk_rth_only = QtWidgets.QCheckBox("Doar RTH"); self.chk_rth_only.setChecked(False)
+        self.chk_rth_only.setToolTip("Arata markerele de order flow (Big/Absorption/Exhaustion/Acc-Rej)\n"
+                                     "DOAR in sesiunea RTH NY (09:30-16:00 ET / 16:30-23:00 RO). Detectia\n"
+                                     "ramane completa; se filtreaza doar afisarea. Default: tot.")
         self.chk_prior = QtWidgets.QCheckBox("Ieri"); self.chk_prior.setChecked(True)
         self.chk_prior.setToolTip("Nivelurile sesiunii precedente: yPOC / yVAH / yVAL + PDH / PDL")
         self.chk_session = QtWidgets.QCheckBox("RTH"); self.chk_session.setChecked(True)
@@ -490,6 +497,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_abs.stateChanged.connect(self._apply_lod)
         self.chk_exh.stateChanged.connect(self._apply_lod)
         self.chk_react.stateChanged.connect(self._apply_lod)
+        self.chk_rth_only.stateChanged.connect(self._rerender_current)   # re-filtreaza markerele
         self.chk_prior.stateChanged.connect(self._update_prior_visibility)
         self.chk_session.stateChanged.connect(self._update_session_shading)
         self.chk_sess.stateChanged.connect(self._on_sess_toggled)
@@ -666,6 +674,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.chk_abs); lay.addWidget(self.btn_abs_settings)
         lay.addWidget(self.chk_exh); lay.addWidget(self.btn_exh_settings)
         lay.addWidget(self.chk_react)
+        lay.addWidget(self.chk_rth_only)
         lay.addWidget(self.chk_grid)
         lay.addWidget(self.chk_cvd)
         lay.addWidget(self.chk_ctx)                                       # Execution Context (P6)
@@ -1803,6 +1812,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.price.setYRange(y0, y1, padding=0)
         self._prog_range = False
 
+    @staticmethod
+    def _is_rth(ep):
+        """True daca epoca e in sesiunea RTH NY (09:30-16:00 ET), DST-corect via zoneinfo.
+        Per-epoca -> corect si in mod multi-zi/perioada (fiecare marker judecat pe ziua lui)."""
+        t = datetime.datetime.fromtimestamp(int(ep), ZoneInfo("America/New_York"))
+        m = t.hour * 60 + t.minute
+        return (9 * 60 + 30) <= m < (16 * 60)
+
+    def _rth_filter(self, items):
+        """Filtreaza markerele la RTH daca 'Doar RTH' e activ (altfel le lasa pe toate).
+        Toate cele 4 tipuri au epoca pe prima pozitie -> filtru uniform."""
+        if not self.chk_rth_only.isChecked():
+            return items
+        return [it for it in items if self._is_rth(it[0])]
+
     def _render(self, d, set_range=True, follow=False):
         """Actualizeaza toate elementele vizuale dintr-un DayData (complet sau partial-replay)."""
         self._data = d
@@ -1834,26 +1858,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self.grid_stats.set_data(d.t, d.volume, delta_v, d.bar_seconds,
                                      tps=getattr(d, "tps", None))
 
-        # Big Trades - bule (marime dupa volum, verde=buy / mov=sell)
-        if d.big_trades:
-            xs = [bt[0] for bt in d.big_trades]
-            ys = [bt[1] for bt in d.big_trades]
-            szs = [_bt_tier(bt[2]) for bt in d.big_trades]   # trepte discrete de marime
+        # Big Trades - bule (marime dupa volum, verde=buy / mov=sell). Filtru optional 'Doar RTH'.
+        big = self._rth_filter(d.big_trades)
+        if big:
+            xs = [bt[0] for bt in big]
+            ys = [bt[1] for bt in big]
+            szs = [_bt_tier(bt[2]) for bt in big]   # trepte discrete de marime
             buy_c = QtGui.QColor(theme.UP); buy_c.setAlpha(235)
             sell_c = QtGui.QColor(theme.DOWN); sell_c.setAlpha(235)
             buy_b, sell_b = pg.mkBrush(buy_c), pg.mkBrush(sell_c)
-            brs = [buy_b if bt[3] == "B" else sell_b for bt in d.big_trades]
-            info = [("big", bt[3], bt[2], bt[1], bt[0]) for bt in d.big_trades]  # tip,side,size,pret,epoca
+            brs = [buy_b if bt[3] == "B" else sell_b for bt in big]
+            info = [("big", bt[3], bt[2], bt[1], bt[0]) for bt in big]  # tip,side,size,pret,epoca
             # Contur luminos -> bula se vede pe orice fundal (footprint), iar culoarea plina = directia
             halo = pg.mkPen(QtGui.QColor(245, 245, 250), width=1.4)
             self.big_scatter.setData(x=xs, y=ys, size=szs, brush=brs, data=info, pen=halo)
         else:
             self.big_scatter.setData(x=[], y=[])
-        self._set_bt_zones(d.big_trades)   # zone S/R din cele mai mari tranzactii (optional)
+        self._set_bt_zones(big)   # zone S/R din cele mai mari tranzactii (optional)
 
         # Absorption - triunghi la extrema respinsa: bull sub minim, bear peste maxim.
         # Finisaj premium: glow translucid dedesubt + triunghi plin cu contur luminos crisp.
-        if d.absorption:
+        abs_m = self._rth_filter(d.absorption)
+        if abs_m:
             yr = float(d.high.max() - d.low.min()) if len(d.high) else 1.0
             off = max(yr * 0.014, d.row_size)
             base = QtGui.QColor(theme.ABSORPTION)                    # galben = categoria Absorption
@@ -1862,7 +1888,7 @@ class MainWindow(QtWidgets.QMainWindow):
             rim = pg.mkPen(QtGui.QColor(250, 250, 255), width=1.3)   # contur luminos -> pop pe orice fundal
             nopen = pg.mkPen(None)
             spots = []
-            for ep, price, kind, buyv, sellv in d.absorption:
+            for ep, price, kind, buyv, sellv in abs_m:
                 info = ("abs", kind, price, buyv, sellv)
                 sym = "t1" if kind == "bull" else "t"               # bull = triunghi sus; bear = jos
                 y = price - off if kind == "bull" else price + off
@@ -1876,7 +1902,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Exhaustion - romb la climaxul de la o extrema noua (coral = avertisment reversal).
         # Finisaj premium: glow translucid + romb plin cu contur luminos.
-        if d.exhaustion:
+        exh_m = self._rth_filter(d.exhaustion)
+        if exh_m:
             yr = float(d.high.max() - d.low.min()) if len(d.high) else 1.0
             off = max(yr * 0.018, d.row_size)
             base = QtGui.QColor(theme.EXHAUSTION)
@@ -1885,7 +1912,7 @@ class MainWindow(QtWidgets.QMainWindow):
             rim = pg.mkPen(QtGui.QColor(250, 250, 255), width=1.3)
             nopen = pg.mkPen(None)
             spots = []
-            for ep, price, kind, vol, delta in d.exhaustion:
+            for ep, price, kind, vol, delta in exh_m:
                 info = ("exh", kind, price, vol, delta)
                 yoff = price + off if kind == "top" else price - off
                 spots.append({"pos": (ep, yoff), "symbol": "d", "size": 24, "brush": glow,
@@ -1897,10 +1924,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.exh_scatter.setData([])
 
         # Acceptance / Rejection - INELE la marginile Value Area (verde bullish / mov bearish)
-        if getattr(d, "level_reactions", None):
+        react_m = self._rth_filter(getattr(d, "level_reactions", None) or [])
+        if react_m:
             up_c = QtGui.QColor(theme.UP); dn_c = QtGui.QColor(theme.DOWN)
             spots = []
-            for ep, price, kind, lvl in d.level_reactions:
+            for ep, price, kind, lvl in react_m:
                 bullish = kind in ("rejection_up", "acceptance_up")
                 col = up_c if bullish else dn_c
                 fill = QtGui.QColor(col); fill.setAlpha(45)   # inel translucid (distinct de bulele pline)

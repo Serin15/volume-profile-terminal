@@ -161,8 +161,11 @@ BIG_TRADE_MIN = 25   # prag "tranzactie mare" pe NQ (single print) - tunable
 
 
 def _big_trades(df, bar_seconds, min_size=BIG_TRADE_MIN):
-    """Tranzactiile individuale mari (>= min_size): (epoca_lumanare, pret, marime, side)."""
-    sub = df[df["size"] >= min_size]
+    """Tranzactiile individuale mari (>= min_size): (epoca_lumanare, pret, marime, side).
+    DOAR agresor cunoscut (B/A): unele print-uri Databento au side 'N' (agresor
+    indeterminat) - le EXCLUDEM, consecvent cu footprint/CVD/delta care oricum ignora 'N'
+    (altfel bula ar fi colorata gresit ca SELL fara sa stim directia)."""
+    sub = df[(df["size"] >= min_size) & (df["side"].isin(["B", "A"]))]
     if sub.empty:
         return []
     tsec = (sub["ts"].astype("int64") // 10**9).to_numpy()
@@ -219,14 +222,20 @@ EXH_DELTA_FRAC = 0.20  # delta in directia trendului >= 20% din volumul lumanari
 def _detector_defaults(bar_seconds):
     """Praguri absorption/exhaustion ADAPTATE la interval, ca detectorii sa prinda aceleasi
     evenimente REALE indiferent de timeframe (altfel pe 1min exhaustion trage ~35x/zi = tapet,
-    pe 15min ~0). Fereastra exhaustion in TIMP (~30 min); granularitatea fina (1-2 min, scalping)
-    cere prag de climax mai strict fiindca volumul de 1min e mai zgomotos. Validat pe date reale:
-    1min -> ~5 exhaustion + ~3 absorption/sesiune (fata de ~35 + ~9 la pragurile fixe vechi).
-    Mediu (5-15 min) = calibrarea validata initial (NESCHIMBAT). Returneaza (abs_kw, exh_kw)."""
+    pe 15min ~0). Fereastra exhaustion in TIMP (~30 min). Returneaza (abs_kw, exh_kw).
+
+    EXHAUSTION 1min — calibrare pe date reale (verify_detectors, 5 zile Aug 2026): volumul/bara
+    are DOUA regimuri complet diferite (RTH median ~697 vs overnight ~88). Un test DOAR relativ
+    (vol >= mult x mediana locala) nu distinge "mare pentru noapte" (~200) de "mare pentru RTH"
+    (~2000) -> pragul vechi 3.5x aprindea 59/5zile, TOATE overnight (30 = zgomot cu volum ~187),
+    ZERO pe RTH, ratand climax-uri RTH reale (ex. 1492 contracte). FIX: prag ABSOLUT min_vol=400
+    (~overnight p95) = "climax = bar absolut mare" + mult scazut 3.5->2.0 (proeminenta locala;
+    semnificatia o da acum pragul absolut). Rezultat: ~5/zi, toate volum real, inclusiv RTH.
+    Mediu (5-15 min) = calibrarea validata initial (NESCHIMBAT, fara prag absolut)."""
     if bar_seconds <= 120:            # 1-2 min (scalping fin)
         win = max(3, int(round(1800 / bar_seconds)))     # ~30 min de lookback
         return ({"min_vol": 85, "frac": 0.30},
-                {"window": win, "vol_mult": 3.5, "delta_frac": 0.25})
+                {"window": win, "vol_mult": 2.0, "delta_frac": 0.25, "min_vol": 400})
     if bar_seconds <= 900:            # 5-15 min (neschimbat)
         return ({"min_vol": ABS_MIN_VOL, "frac": ABS_FRAC},
                 {"window": EXH_WINDOW, "vol_mult": EXH_VOL_MULT, "delta_frac": EXH_DELTA_FRAC})
@@ -278,7 +287,8 @@ def detect_absorption(footprint, t, high, low, close, row_size, exclude_last=Fal
 
 
 def detect_exhaustion(footprint, t, high, low, close, volume, exclude_last=False,
-                      window=EXH_WINDOW, vol_mult=EXH_VOL_MULT, delta_frac=EXH_DELTA_FRAC):
+                      window=EXH_WINDOW, vol_mult=EXH_VOL_MULT, delta_frac=EXH_DELTA_FRAC,
+                      min_vol=0):
     """
     Exhaustion (climax): o lumanare face o EXTREMA NOUA pe fereastra, cu volum CLIMAX
     (>> mediana recenta) si delta puternica IN directia trendului (cumparatori la maxim
@@ -301,8 +311,10 @@ def detect_exhaustion(footprint, t, high, low, close, volume, exclude_last=False
         vol = float(vol_arr[i])
         if vol <= 0:
             continue
+        if vol < min_vol:                          # prag ABSOLUT de volum: un climax trebuie sa fie
+            continue                               # un bar absolut mare, nu doar "mare vs liniste de noapte"
         med = float(np.median(vol_arr[i - window:i]))
-        if med <= 0 or vol < vol_mult * med:       # nu e climax de volum
+        if med <= 0 or vol < vol_mult * med:       # nu e climax de volum (proeminenta LOCALA)
             continue
         delta = sum(b - s for (b, s) in cells.values())
         new_high = hi[i] >= hi[i - window:i + 1].max() - 1e-9
