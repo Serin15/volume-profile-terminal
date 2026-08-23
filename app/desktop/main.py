@@ -1420,12 +1420,14 @@ class MainWindow(QtWidgets.QMainWindow):
                         bd, best = dd, (sc, p)
             return best, bd
 
-        # PRIORITATE: Absorption/Exhaustion (semnale specifice) inaintea Big Trades
-        # (bulele dense/mari furau selectia cand hover-uiai putin pe langa triunghi).
-        best, bd = closest((self.abs_scatter, self.exh_scatter))
-        if best is None or bd > 16.0:
+        # PRIORITATE: semnalele specifice (Absorption/Exhaustion/Acc-Rej) inaintea Big Trades
+        # (bulele dense/mari furau selectia cand hover-uiai putin pe langa marker).
+        # FIX: react (Acc/Rej) LIPSEA aici -> nu avea tooltip. Adaugat. + raza putin mai mare.
+        R = 22.0
+        best, bd = closest((self.abs_scatter, self.exh_scatter, self.react_scatter))
+        if best is None or bd > R:
             best, bd = closest((self.big_scatter,))
-        if best is not None and bd <= 16.0:          # in ~16 px de un marker -> arata cardul
+        if best is not None and bd <= R:             # in ~R px de un marker -> arata cardul
             self._on_marker_hover(best[0], [best[1]], pt)
         else:
             self.hover_card.setVisible(False)
