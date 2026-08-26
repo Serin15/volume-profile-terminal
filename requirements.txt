@@ -18,5 +18,11 @@ uvicorn
 PySide6
 pyqtgraph
 
+# Fus orar / DST (zoneinfo pe Windows NU are baza de fusuri fara asta -> granita sesiunii
+# DST-aware, filtrul "Doar RTH" si umbrirea sesiunii ar crapa pe un PC nou fara tzdata)
+tzdata
+
 # Teste
 pytest
+
+# Packaging .exe (optional, doar pt build PyInstaller - vezi MIGRATION.md): pyinstaller
