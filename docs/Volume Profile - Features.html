@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Volume Profile Terminal — Ce aveai vs. ce ai adaugat</title>
+</head>
+<body style="margin:0;background:#08090b">
+<style>
+  :root{
+    --bg:#08090b; --panel:#101116; --panel2:#15161c; --border:#20222b;
+    --grid:#12141b; --text:#e8e9ee; --dim:#828795; --dimmer:#5a5e6b;
+    --amber:#ff9d2e; --green:#2ee08a; --mauve:#b06bf7; --magenta:#ff2d7e;
+    --cyan:#26c6da; --lvn:#8593a0; --indigo:#6f7bd6; --teal:#2bd4c0;
+    --mono:ui-monospace,"Cascadia Code","SF Mono",Consolas,"Liberation Mono",monospace;
+    --sans:system-ui,"Segoe UI","Inter",-apple-system,sans-serif;
+  }
+  *{box-sizing:border-box}
+  .wrap{
+    max-width:1080px;margin:0 auto;padding:40px 24px 72px;
+    color:var(--text);font-family:var(--sans);line-height:1.5;
+    background:
+      linear-gradient(var(--grid) 1px,transparent 1px) 0 0/100% 34px,
+      linear-gradient(90deg,var(--grid) 1px,transparent 1px) 0 0/34px 100%,
+      var(--bg);
+    background-attachment:fixed;
+  }
+  .eyebrow{
+    font-family:var(--mono);font-size:11px;letter-spacing:.22em;
+    text-transform:uppercase;color:var(--dim);
+  }
+  header .eyebrow{color:var(--amber)}
+  h1{
+    font-size:clamp(28px,5vw,44px);line-height:1.05;margin:.28em 0 .1em;
+    font-weight:750;letter-spacing:-.02em;text-wrap:balance;
+  }
+  .sub{color:var(--dim);font-size:16px;max-width:60ch}
+  .metastrip{
+    display:flex;flex-wrap:wrap;gap:10px;margin-top:22px;
+  }
+  .pill{
+    font-family:var(--mono);font-size:12.5px;padding:7px 13px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--dim);
+    display:inline-flex;align-items:center;gap:8px;
+  }
+  .pill b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+  .pill .dot{width:7px;height:7px;border-radius:50%}
+  .rule{height:1px;background:var(--border);margin:40px 0 30px;border:0}
+
+  .sectlabel{display:flex;align-items:baseline;gap:14px;margin-bottom:20px}
+  .sectlabel h2{font-size:15px;font-weight:600;letter-spacing:.04em;margin:0}
+  .sectlabel .n{font-family:var(--mono);font-size:12px;color:var(--dimmer)}
+  .sectlabel .line{flex:1;height:1px;background:var(--border)}
+
+  /* BEFORE — grouped compact lists */
+  .grid-before{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+  .card{
+    background:var(--panel);border:1px solid var(--border);border-radius:12px;
+    padding:16px 16px 14px;position:relative;overflow:hidden;
+  }
+  .card .cat{
+    font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+    display:flex;align-items:center;gap:8px;margin-bottom:12px;color:var(--dim);
+  }
+  .card .cat .swatch{width:9px;height:9px;border-radius:2px;flex:none}
+  ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+  li{font-size:13.5px;color:var(--text);padding-left:16px;position:relative}
+  li::before{content:"";position:absolute;left:0;top:.62em;width:5px;height:5px;
+    border-radius:50%;background:var(--dimmer)}
+  li small{color:var(--dim);font-size:12px}
+
+  /* ADDED — feature cards */
+  .grid-new{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+  .feat{
+    background:linear-gradient(180deg,var(--panel2),var(--panel));
+    border:1px solid var(--border);border-radius:14px;padding:20px 20px 18px;
+    position:relative;overflow:hidden;
+  }
+  .feat::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--ac)}
+  .feat .top{display:flex;align-items:center;gap:11px;margin-bottom:12px}
+  .feat .tag{
+    font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.05em;
+    padding:4px 9px;border-radius:6px;color:#08090b;background:var(--ac);white-space:nowrap;
+  }
+  .feat h3{font-size:17px;margin:0;font-weight:650;letter-spacing:-.01em}
+  .feat p{margin:0 0 14px;font-size:13.5px;color:var(--dim)}
+  .feat p b{color:var(--text);font-weight:600}
+  .feat .where{
+    font-family:var(--mono);font-size:11.5px;color:var(--dim);
+    display:flex;align-items:center;gap:8px;padding-top:12px;border-top:1px solid var(--border);
+  }
+  .feat .where span{color:var(--ac);font-weight:600}
+  .feat .swatches{display:inline-flex;gap:4px;margin-left:2px}
+  .feat .swatches i{width:9px;height:9px;border-radius:2px;display:inline-block}
+
+  footer{
+    margin-top:44px;padding:20px 22px;border:1px solid var(--border);border-radius:12px;
+    background:var(--panel);display:flex;flex-wrap:wrap;align-items:center;
+    justify-content:space-between;gap:14px;
+  }
+  footer .big{font-family:var(--mono);font-size:15px;color:var(--text)}
+  footer .big b{color:var(--green);font-weight:700;font-variant-numeric:tabular-nums}
+  footer .arrow{color:var(--dimmer);margin:0 6px}
+  footer .note{font-size:12.5px;color:var(--dim)}
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Volume Profile Terminal · NQ</div>
+    <h1>Ce aveai &amp; ce ai adăugat</h1>
+    <p class="sub">Terminalul tău de order flow — starea completă, plus cele 4 funcții noi din workflow-ul traderului pro.</p>
+    <div class="metastrip">
+      <span class="pill"><span class="dot" style="background:var(--green)"></span>Actualizat <b>03.08.2026</b></span>
+      <span class="pill"><b>78</b> teste trec</span>
+      <span class="pill"><span class="dot" style="background:var(--amber)"></span><b>+4</b> funcții noi</span>
+      <span class="pill">zero regresii</span>
+    </div>
+  </header>
+
+  <hr class="rule">
+
+  <div class="sectlabel">
+    <span class="n">01</span>
+    <h2>Ce aveai înainte</h2>
+    <span class="line"></span>
+  </div>
+
+  <div class="grid-before">
+    <div class="card">
+      <div class="cat"><span class="swatch" style="background:var(--cyan)"></span>Volume Profile &amp; niveluri</div>
+      <ul>
+        <li>Volume Profile overlay <small>— POC, VAH/VAL, Value Area</small></li>
+        <li>HVN / LVN <small>— vârfuri &amp; văi reale</small></li>
+        <li>Developing POC / VA</li>
+        <li>Perioadă: Sesiune · Zi UTC · Composite (săpt.) · Visible · Custom</li>
+        <li>Rezoluție &amp; VA% configurabile</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="cat"><span class="swatch" style="background:var(--mauve)"></span>Order flow</div>
+      <ul>
+        <li>Footprint <small>— bare bid/ask, moduri, imbalance</small></li>
+        <li>Delta / lumânare + CVD</li>
+        <li>Big Trades + zone S/R</li>
+        <li>Absorption</li>
+        <li>Exhaustion</li>
+        <li>Grid stats <small>— ΣV / ΔV / Δ%</small></li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="cat"><span class="swatch" style="background:var(--amber)"></span>VWAP</div>
+      <ul>
+        <li>VWAP developing</li>
+        <li>Anchored VWAP <small>— ancore multiple, benzi ±σ</small></li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="cat"><span class="swatch" style="background:var(--magenta)"></span>Context / sesiune</div>
+      <ul>
+        <li>Niveluri de ieri <small>— yPOC/yVAH/yVAL + PDH/PDL, VA box, POC ray</small></li>
+        <li>RTH shading <small>— overnight umbrit, NY iese în evidență</small></li>
+        <li>Compare <small>— a doua sesiune suprapusă</small></li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="cat"><span class="swatch" style="background:var(--teal)"></span>Backtesting &amp; interacțiune</div>
+      <ul>
+        <li>Replay tick-by-tick <small>— scrubber, jump-to-minut, follow</small></li>
+        <li>Unelte desen <small>— trend, dreptunghi, nivel, fib, măsură, Long/Short</small></li>
+        <li>Fusuri auto-DST · crosshair · hover pe niveluri</li>
+        <li>Smart Layers (LOD pe zoom) · temă dark</li>
+      </ul>
+    </div>
+  </div>
+
+  <hr class="rule">
+
+  <div class="sectlabel">
+    <span class="n">02</span>
+    <h2>Adăugat acum</h2>
+    <span class="line"></span>
+  </div>
+
+  <div class="grid-new">
+    <div class="feat" style="--ac:var(--lvn)">
+      <div class="top">
+        <span class="tag">LVN FULL</span>
+        <h3>LVN pe tot profilul</h3>
+      </div>
+      <p>Detectează LVN pe <b>tot profilul</b>, inclusiv spre margini = zonele de <b>discount / premium</b> unde prețul n-a stat — nu doar văile dintre HVN.</p>
+      <div class="where">📍 <span>⚙ Volume Profile</span> → checkbox „LVN pe tot profilul"</div>
+    </div>
+
+    <div class="feat" style="--ac:var(--amber)">
+      <div class="top">
+        <span class="tag">COMPOSITE</span>
+        <h3>Composite 15d / 90d</h3>
+      </div>
+      <p>Profil agregat pe ultimele <b>15 zile</b> (structură) sau <b>90 zile</b> (bias). Înainte aveai doar composite pe săptămână.</p>
+      <div class="where">📍 <span>Perioadă</span> → „Composite 15 / 90 zile"</div>
+    </div>
+
+    <div class="feat" style="--ac:var(--indigo)">
+      <div class="top">
+        <span class="tag">SESIUNI</span>
+        <h3>Profile per-sesiune</h3>
+      </div>
+      <p>VP <b>separat</b> pe Asia / Londra / NY — POC, VAH/VAL + LVN per sesiune. Două moduri (<b>fus real</b> auto-DST sau <b>ore RO fixe</b>), toate orele editabile.</p>
+      <div class="where">📍 <span>„Sesiuni"</span> + ⚙
+        <span class="swatches"><i style="background:var(--indigo)"></i><i style="background:var(--green)"></i><i style="background:var(--mauve)"></i></span>
+      </div>
+    </div>
+
+    <div class="feat" style="--ac:var(--amber)">
+      <div class="top">
+        <span class="tag">SPEED OF TAPE</span>
+        <h3>Viteza tape-ului</h3>
+      </div>
+      <p>Rând nou <b>„T/s"</b> în grid — câte <b>print-uri/secundă</b> are fiecare lumânare. Independent de volum; spike = agresivitate / breakout.</p>
+      <div class="where">📍 <span>Grid jos</span> → rând amber peste ΣV/ΔV/Δ%</div>
+    </div>
+  </div>
+
+  <footer>
+    <div class="big"><b>68</b><span class="arrow">→</span><b>78</b> teste · zero regresii</div>
+    <div class="note">Toate cele 4 vin din workflow-ul traderului pro (DeepChart). Fiecare cu toggle/⚙, nimic vechi stricat.</div>
+  </footer>
+</div>
+</body>
+</html>
